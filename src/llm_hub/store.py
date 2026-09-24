@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -146,6 +147,15 @@ def slugify(title: str) -> str:
     return slug[:40].rstrip("-") or "thread"
 
 
+def web_url(remote: str) -> str:
+    """git@github.com:owner/repo.git or https://github.com/owner/repo.git -> https://github.com/owner/repo"""
+    remote = remote.strip()
+    m = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?", remote)
+    if m:
+        return f"https://{m.group(1)}/{m.group(2)}"
+    return re.sub(r"(?:\.git)?/?$", "", re.sub(r"^(https?://)[^@/]+@", r"\1", remote))
+
+
 def normalize_thread_id(raw: str) -> str:
     m = re.fullmatch(r"(?:T-?)?0*(\d+)", raw.strip(), re.IGNORECASE)
     if not m:
@@ -188,6 +198,20 @@ class Hub:
     @property
     def max_turns(self) -> int:
         return int(self.config["max_turns"])
+
+    @property
+    def repo_url(self) -> str | None:
+        """Where agents without repo access can read the code: `repo_url` in hub.yaml, else the git origin."""
+        if "repo_url" in self.config:
+            return self.config["repo_url"] or None
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(self.root.parent), "remote", "get-url", "origin"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return web_url(out.stdout) if out.returncode == 0 and out.stdout.strip() else None
 
     # ---------- low-level io ----------
 

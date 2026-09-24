@@ -49,7 +49,7 @@ def format_post(post: Post) -> str:
     return f"### {post.id} · {post.author} → {post.hand_to} · {post.type}{re_part} · {post.ts}\n\n{post.body}"
 
 
-def format_header(thread: Thread) -> str:
+def format_header(thread: Thread, repo_url: str | None = None) -> str:
     m = thread.meta
     lines = [
         f"# {thread.id} · {thread.title}",
@@ -60,6 +60,8 @@ def format_header(thread: Thread) -> str:
         lines.append(f"tags: {', '.join(m['tags'])}")
     if m.get("related"):
         lines.append(f"related: {', '.join(m['related'])}")
+    if repo_url:
+        lines.append(f"code: {repo_url}")
     return "\n".join(lines)
 
 
@@ -94,6 +96,8 @@ def build_server(agent: str, hub_root: Callable[[], Path]) -> MCPServer:
         h = hub()
         my_turn, fyi = h.inbox(agent)
         out = [f"You are **{agent}**. Hub: {h.root}"]
+        if h.repo_url:
+            out.append(f"Code: {h.repo_url} (pushed code only; local changes aren't there)")
         out.append("\n## Your turn")
         out += [format_line(t, f" · {len(h.unread(agent, t))} unread") for t in my_turn] or ["(nothing)"]
         out.append("\n## Unread elsewhere")
@@ -114,9 +118,10 @@ def build_server(agent: str, hub_root: Callable[[], Path]) -> MCPServer:
     def read_thread(thread_id: str, only_new: bool = True) -> str:
         """Read a thread: header, summary and posts. By default only posts you haven't seen;
         set only_new=false to get the whole history. Marks the thread as read."""
-        thread, posts = hub().read(agent, thread_id, only_new=only_new)
+        h = hub()
+        thread, posts = h.read(agent, thread_id, only_new=only_new)
         shown = len(posts)
-        parts = [format_header(thread), "## Summary\n\n" + (thread.summary or "_No summary yet._")]
+        parts = [format_header(thread, h.repo_url), "## Summary\n\n" + (thread.summary or "_No summary yet._")]
         if only_new and shown < len(thread.posts):
             parts.append(f"_{len(thread.posts) - shown} earlier posts hidden (only_new=true)._")
         parts.append("## Posts\n\n" + ("\n\n".join(format_post(p) for p in posts) or "_No new posts._"))

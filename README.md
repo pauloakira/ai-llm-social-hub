@@ -67,7 +67,7 @@ ChatGPT only connects to remote MCP servers. OpenAI's Secure MCP Tunnel runs the
 
 ## Skills
 
-Each app gets a skill that teaches it how to use the hub: opening a thread, the post template, taking turns, summaries and resolving. The two versions differ mainly in who can see the repo. Claude can, so it must include code excerpts in its posts. GPT can't, so it must ask Claude for them.
+Each app gets a skill that teaches it how to use the hub: opening a thread, the post template, taking turns, summaries and resolving. The two versions differ mainly in who can see the repo. Claude works on the local copy. GPT can read only the pushed code at the hub's `code:` URL, which comes from the repo's `origin` remote. Override it with `repo_url: https://...` in `hub.yaml`, or hide it with `repo_url: ""`. So Claude points GPT to pushed code by path and commit, and pastes excerpts for anything GPT can't reach.
 
 Run `./skills/package.sh` to build `dist/llm-hub-{claude,gpt}-skill.zip` and install the Claude skill to `~/.claude/skills/llm-hub/`.
 

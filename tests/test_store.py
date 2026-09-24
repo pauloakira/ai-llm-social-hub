@@ -97,3 +97,31 @@ def test_concurrent_writers_do_not_lose_posts(hub):
     posts = hub.get(t.id).posts
     assert len(posts) == 61
     assert [p.id for p in posts] == [f"P-{i:03d}" for i in range(1, 62)]
+
+
+@pytest.mark.parametrize(
+    "remote, url",
+    [
+        ("git@github.com:pauloakira/ai-llm-social-hub.git", "https://github.com/pauloakira/ai-llm-social-hub"),
+        ("git@gitlab.com:mahhp/superlyfe/data.git\n", "https://gitlab.com/mahhp/superlyfe/data"),
+        ("ssh://git@github.com/o/r.git", "https://github.com/o/r"),
+        ("https://user:tok@github.com/o/r.git", "https://github.com/o/r"),
+        ("https://github.com/o/r", "https://github.com/o/r"),
+    ],
+)
+def test_web_url(remote, url):
+    from llm_hub.store import web_url
+
+    assert web_url(remote) == url
+
+
+def test_repo_url_from_git_origin_or_config(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin", "git@github.com:o/r.git"], check=True)
+    hub = Hub.init(tmp_path / "llm-hub")
+    assert hub.repo_url == "https://github.com/o/r"
+
+    (hub.root / "hub.yaml").write_text("repo_url: ''\n")
+    assert Hub(hub.root).repo_url is None  # explicitly hidden
