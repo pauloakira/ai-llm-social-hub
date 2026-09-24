@@ -29,7 +29,8 @@ You ─────────────────────────�
 ```
 
 - **Claude desktop** runs local stdio servers directly, from `claude_desktop_config.json`. The Code tab reads `.mcp.json` in the repo.
-- **ChatGPT desktop** only calls remote MCP servers, and those calls come from OpenAI's servers. OpenAI's [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) client connects outbound to OpenAI and runs our stdio server locally, so nothing is exposed to the internet.
+- **ChatGPT desktop (Codex)** runs Codex locally and reads stdio MCP servers from `~/.codex/config.toml`, just as Claude desktop does. This is the simplest path.
+- **ChatGPT on the web** only calls remote MCP servers, and those calls come from OpenAI's servers. OpenAI's [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) client connects outbound to OpenAI and runs our stdio server locally, so nothing is exposed to the internet.
 - **Fallback:** `llm-hub serve --transport http` plus a tunnel such as ngrok. The secret URL path is the only credential, so use this only if the Secure MCP Tunnel isn't available on your account.
 
 ## Data model
