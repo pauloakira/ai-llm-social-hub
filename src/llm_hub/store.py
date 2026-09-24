@@ -78,6 +78,11 @@ class Thread:
     def title(self) -> str:
         return self.meta["title"]
 
+    @property
+    def revision(self) -> int:
+        """Bumped by every change to the thread; agents must send the one they read (compare-and-swap)."""
+        return int(self.meta.get("revision", 0))
+
     def render(self) -> str:
         front = yaml.safe_dump(self.meta, sort_keys=False, allow_unicode=True).strip()
         summary = _escape(self.summary.strip()) or "_No summary yet._"
@@ -324,6 +329,30 @@ class Hub:
         if post_type not in POST_TYPES:
             raise HubError(f"Invalid type {post_type!r}. Use one of: {', '.join(POST_TYPES)}.")
 
+    @staticmethod
+    def _check_agent_write(thread: Thread, author: str, expected_revision: int | None) -> None:
+        """Agents may change a thread only when it's open, it's their turn, and nothing changed since they read it.
+        The human is exempt. Must be called under the store lock."""
+        if author == HUMAN:
+            return
+        meta = thread.meta
+        if meta["status"] != "open":
+            raise HubError(f"{thread.id} is {meta['status']}. Only the human can reopen it.")
+        if meta["awaiting"] not in (author, NOBODY):
+            raise HubError(f"It's {meta['awaiting']}'s turn on {thread.id}, not yours. Wait for your turn.")
+        if expected_revision is None:
+            raise HubError(f"Pass expected_revision: the revision read_thread showed for {thread.id}.")
+        if expected_revision != thread.revision:
+            raise HubError(
+                f"{thread.id} changed since you read it (revision {thread.revision}, you sent {expected_revision}). "
+                "Call read_thread again and rethink before writing."
+            )
+
+    @staticmethod
+    def _bump(thread: Thread, ts: str | None = None) -> None:
+        thread.meta["revision"] = thread.revision + 1
+        thread.meta["updated"] = ts or now()
+
     def create_thread(
         self,
         author: str,
@@ -353,6 +382,7 @@ class Hub:
                 "related": [normalize_thread_id(r) for r in related or []],
                 "turns": 0 if author == HUMAN else 1,
                 "max_turns": self.max_turns,
+                "revision": 1,
                 "created": ts,
                 "updated": ts,
             }
@@ -371,6 +401,7 @@ class Hub:
         post_type: str = "answer",
         re_: str | None = None,
         *,
+        expected_revision: int | None = None,
         resolve: bool = False,
     ) -> tuple[Thread, Post, list[str]]:
         """Append a post. Returns (thread, post, notes for the author)."""
@@ -383,11 +414,7 @@ class Hub:
         with self._lock():
             thread = self.get(thread_id)
             meta = thread.meta
-            if author != HUMAN:
-                if meta["status"] != "open":
-                    raise HubError(f"{thread.id} is {meta['status']}. Only the human can reopen it.")
-                if meta["awaiting"] not in (author, NOBODY):
-                    raise HubError(f"It's {meta['awaiting']}'s turn on {thread.id}, not yours. Wait for your turn.")
+            self._check_agent_write(thread, author, expected_revision)
             if re_ and not thread.post(re_):
                 raise HubError(f"Post {re_} doesn't exist in {thread.id}.")
 
@@ -408,7 +435,7 @@ class Hub:
             post = Post(f"P-{len(thread.posts) + 1:03d}", author, hand_to, post_type, now(), body, re_)
             thread.posts.append(post)
             meta["awaiting"] = hand_to
-            meta["updated"] = post.ts
+            self._bump(thread, post.ts)
             if resolve:
                 meta["status"] = "resolved"
                 meta["resolved_by"] = author
@@ -420,16 +447,23 @@ class Hub:
             self._set_cursor(author, thread)
         return thread, post, notes
 
-    def update_summary(self, author: str, thread_id: str, summary: str) -> Thread:
+    def update_summary(
+        self, author: str, thread_id: str, summary: str, *, expected_revision: int | None = None
+    ) -> Thread:
         self._check_agent(author, "author")
         with self._lock():
             thread = self.get(thread_id)
+            self._check_agent_write(thread, author, expected_revision)
             thread.summary = summary.strip()
             thread.meta["summary_by"] = author
-            thread.meta["updated"] = now()
+            self._bump(thread)
             self._save(thread)
         return thread
 
-    def resolve(self, author: str, thread_id: str, decision: str) -> Thread:
-        thread, _, _ = self.reply(author, thread_id, decision, NOBODY, "decision", resolve=True)
+    def resolve(
+        self, author: str, thread_id: str, decision: str, *, expected_revision: int | None = None
+    ) -> Thread:
+        thread, _, _ = self.reply(
+            author, thread_id, decision, NOBODY, "decision", expected_revision=expected_revision, resolve=True
+        )
         return thread

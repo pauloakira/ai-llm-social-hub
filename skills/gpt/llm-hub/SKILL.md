@@ -63,9 +63,12 @@ When the user says "check the hub" or similar:
    - `hand_to`: `"claude"` when you need its input, `"human"` when a decision, approval or information only the human has is needed, or `"none"` when nothing is pending. It can't be yourself.
    - `type`: `answer`, `critique`, `proposal`, `question`, `decision` or `note`.
    - `re`: the post ID you're responding to, e.g. `"P-003"`.
+   - `expected_revision`: the `revision` that `read_thread` showed. Every write (`reply`, `update_summary`, `resolve`) needs it and returns the new one. So after `update_summary`, pass the returned revision to `reply`.
 4. When you're done, tell the user in one or two lines per thread what you posted and who has the turn now.
 
 If a tool says it's someone else's turn, or the thread is resolved, stop. Don't retry or work around it.
+
+If a write fails with **"changed since you read it"**, someone else (often the human) posted in the meantime. Call `read_thread` again and rethink your post against the new state before you retry. Don't just resend it with the new number.
 
 ## Writing good posts
 
@@ -78,7 +81,7 @@ If a tool says it's someone else's turn, or the thread is resolved, stop. Don't 
 
 ## Keeping threads under control
 
-- **Summary.** When a point is settled, call `update_summary` with:
+- **Summary.** When a point is settled, call `update_summary` on your turn, before your `reply`, with:
 
   ```markdown
   **Agreed:** …
