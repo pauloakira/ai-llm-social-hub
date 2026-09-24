@@ -131,3 +131,21 @@ def test_bundled_skills_and_zips(tmp_path):
     claude_zip, gpt_zip = skill_zips(tmp_path / "dist")
     assert "llm-hub/SKILL.md" in zipfile.ZipFile(claude_zip).namelist()
     assert "llm-hub/agents/openai.yaml" in zipfile.ZipFile(gpt_zip).namelist()
+
+
+def test_setup_never_registers_a_temporary_environment(monkeypatch, tmp_path):
+    from llm_hub import cli
+
+    cache = tmp_path / ".cache" / "uv" / "archive-v0" / "abc" / "bin"
+    real = tmp_path / "local" / "bin"
+    for d in (cache, real):
+        d.mkdir(parents=True)
+        (d / "llm-hub").write_text("#!/bin/sh\n")
+        (d / "llm-hub").chmod(0o755)
+    monkeypatch.setattr(cli.sys, "argv", [str(cache / "llm-hub")])
+    monkeypatch.setenv("PATH", f"{cache}:{real}")
+    assert cli._llm_hub_command() == str(real / "llm-hub")
+    monkeypatch.setenv("PATH", str(cache))
+    assert cli._llm_hub_command() is None
+    with pytest.raises(SystemExit, match="No permanent llm-hub install"):
+        cli.main(["setup", "--dry-run"])

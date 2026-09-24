@@ -102,10 +102,19 @@ def cmd_serve(args: argparse.Namespace) -> None:
     )
 
 
-def _llm_hub_command() -> str:
-    """Absolute path the apps should launch: the installed `llm-hub` on PATH, else this executable."""
-    found = shutil.which("llm-hub")
-    return str(Path(found).absolute()) if found else str(Path(sys.argv[0]).absolute())
+def _is_ephemeral(path: str) -> bool:
+    """uvx/`uv tool run` and `uv run` environments can vanish; apps must not be pointed at them."""
+    return any(part in path for part in ("/.cache/uv/", "/uv/archive-v", "/.venv/"))
+
+
+def _llm_hub_command() -> str | None:
+    """Absolute path the apps should launch: the first persistent `llm-hub` on PATH, or this executable."""
+    candidates = [str(Path(d) / "llm-hub") for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    candidates.append(str(Path(sys.argv[0]).absolute()))
+    for path in candidates:
+        if os.access(path, os.X_OK) and not _is_ephemeral(path):
+            return str(Path(path).absolute())
+    return None
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -120,6 +129,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
             console.print(f"built {path}")
         return
     command = args.command or _llm_hub_command()
+    if not command:
+        raise HubError(
+            "No permanent llm-hub install found (this one runs from a temporary environment). Install it first: "
+            "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub, then run llm-hub setup."
+        )
     steps = run_setup(
         Path.home(), command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall
     )
