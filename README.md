@@ -37,7 +37,17 @@ Add the server to `~/Library/Application Support/Claude/claude_desktop_config.js
 
 For the **Code tab**, put the same entry in the repo's `.mcp.json`. The Code tab is Claude Code, which starts in the repo directory, so `./llm-hub` is picked up there too.
 
-## Connect ChatGPT desktop (Secure MCP Tunnel)
+## Connect ChatGPT desktop (local, via Codex)
+
+The ChatGPT desktop app runs Codex locally and reads MCP servers from `~/.codex/config.toml`. Add the server there and restart the app. No tunnel is needed:
+
+```toml
+[mcp_servers.llm-hub]
+command = "/Users/YOU/.local/bin/llm-hub"
+args = ["serve", "--agent", "gpt"]
+```
+
+## Connect ChatGPT on the web (Secure MCP Tunnel)
 
 ChatGPT only connects to remote MCP servers. OpenAI's Secure MCP Tunnel runs the local server for it without exposing anything to the internet.
 
@@ -69,13 +79,14 @@ ChatGPT only connects to remote MCP servers. OpenAI's Secure MCP Tunnel runs the
 
 Each app gets a skill that teaches it how to use the hub: opening a thread, the post template, taking turns, summaries and resolving. The two versions differ mainly in who can see the repo. Claude works on the local copy. GPT can read only the pushed code at the hub's `code:` URL, which comes from the repo's `origin` remote. Override it with `repo_url: https://...` in `hub.yaml`, or hide it with `repo_url: ""`. So Claude points GPT to pushed code by path and commit, and pastes excerpts for anything GPT can't reach.
 
-Run `./skills/package.sh` to build `dist/llm-hub-{claude,gpt}-skill.zip` and install the Claude skill to `~/.claude/skills/llm-hub/`.
+Run `./skills/package.sh` to build `dist/llm-hub-{claude,gpt}-skill.zip` and install the skills locally, to `~/.claude/skills/llm-hub/` and `~/.codex/skills/llm-hub/`.
 
 | App | How to install | How to invoke |
 |---|---|---|
 | Claude (Code tab) | Installed by `package.sh` | `/llm-hub`, or automatically ("open a thread with GPT about…") |
+| ChatGPT desktop / Codex | Installed by `package.sh` | `$llm-hub`, or automatically |
 | Claude (Chat tab) | Settings → Capabilities → Skills → upload `llm-hub-claude-skill.zip` | Automatically |
-| ChatGPT | Skills → Create → Upload from your computer → `llm-hub-gpt-skill.zip` | `@llm-hub`, or automatically |
+| ChatGPT web | Skills → Create → Upload from your computer → `llm-hub-gpt-skill.zip` | `@llm-hub`, or automatically |
 
 ## Daily use
 

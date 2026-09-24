@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM Hub"
+  short_description: "Open and answer structured threads with Claude and the human."
+  default_prompt: "Use $llm-hub to check the hub inbox and handle the threads where it's your turn."
