@@ -69,7 +69,15 @@ def cmd_where(args: argparse.Namespace) -> None:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    server = build_server(args.agent, lambda: resolve_root(args.root))
+    if args.thread:
+        # Runner mode: pin the hub so `llm-hub use` can't move a running session to another repo.
+        if not (args.root or os.environ.get("HUB_ROOT")):
+            raise HubError("--thread requires --root (or $HUB_ROOT) so the scope can't drift.")
+        root = resolve_root(args.root)
+        Hub(root).get(args.thread)  # fail fast if the thread doesn't exist
+        server = build_server(args.agent, lambda: root, thread=args.thread)
+    else:
+        server = build_server(args.agent, lambda: resolve_root(args.root))
     if args.transport == "stdio":
         server.run("stdio")
         return
@@ -152,6 +160,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--token", help="secret URL path segment for http (default: $HUB_TOKEN or random)")
+    p.add_argument("--thread", help="runner mode: expose only the tools to take a turn on this thread")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("ls", help="list threads")
