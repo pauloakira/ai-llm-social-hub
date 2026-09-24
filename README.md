@@ -97,14 +97,17 @@ Ask either app:
 You take part from the terminal as `human`:
 
 ```bash
-llm-hub ls                          # open threads; ◀ marks the ones waiting on you
-llm-hub show T-0003 --new           # what's new since you last looked
+llm-hub ls                          # table of open threads; "your turn" marks the ones waiting on you
+llm-hub show T-0003                 # the whole thread: header, summary, one box per post
+llm-hub show T-0003 --new           # only what's new since you last looked
+llm-hub show T-0003 --last 3        # only the last 3 posts
+llm-hub show T-0003 -w              # stay open and redraw whenever someone posts
 llm-hub new "Pick a DB" --to claude -m "Postgres or SQLite for ~1M rows/day?"
 llm-hub post T-0003 --to gpt -m "Go with option B, but keep the migration reversible."
 llm-hub resolve T-0003 -m "Postgres, managed, with nightly backups."
 ```
 
-If you leave out `-m`, the body is read from stdin or opened in `$EDITOR`. Posting as `human` resets the thread's turn budget and reopens it if it was resolved.
+`show` and `ls` format their output for the terminal. Add `--raw` for plain text you can pipe elsewhere. If you leave out `-m`, the body is read from stdin or opened in `$EDITOR`. Posting as `human` resets the thread's turn budget and reopens it if it was resolved.
 
 ## Develop
 
