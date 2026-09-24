@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,66 @@ def cmd_serve(args: argparse.Namespace) -> None:
         # The Host header is the tunnel's hostname, so host checks can't apply; the secret path guards access.
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
+
+
+def _is_ephemeral(path: str) -> bool:
+    """uvx/`uv tool run` and `uv run` environments can vanish; apps must not be pointed at them."""
+    return any(part in path for part in ("/.cache/uv/", "/uv/archive-v", "/.venv/"))
+
+
+def _llm_hub_command() -> str | None:
+    """Absolute path the apps should launch: the first persistent `llm-hub` on PATH, or this executable."""
+    candidates = [str(Path(d) / "llm-hub") for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    candidates.append(str(Path(sys.argv[0]).absolute()))
+    for path in candidates:
+        if os.access(path, os.X_OK) and not _is_ephemeral(path):
+            return str(Path(path).absolute())
+    return None
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    from rich.console import Console
+    from rich.table import Table
+
+    from .setup import run_setup, skill_zips
+
+    console = Console()
+    if args.zip:
+        for path in skill_zips(Path(args.zip).expanduser()):
+            console.print(f"built {path}")
+        return
+    command = args.command or _llm_hub_command()
+    if not command:
+        raise HubError(
+            "No permanent llm-hub install found (this one runs from a temporary environment). Install it first: "
+            "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub, then run llm-hub setup."
+        )
+    steps = run_setup(
+        Path.home(), command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall
+    )
+    colors = {"added": "green", "updated": "yellow", "removed": "yellow", "present": "grey62",
+              "absent": "grey62", "skipped": "grey50", "blocked": "bold yellow", "failed": "bold red"}
+    table = Table(box=None, pad_edge=False, header_style="bold grey62")
+    for col in ("Target", "Status", "Where"):
+        table.add_column(col)
+    for step in steps:
+        table.add_row(step.target, f"[{colors.get(step.status, '')}]{step.status}[/]", step.detail)
+    verb = "Would change" if args.dry_run else ("Uninstalled" if args.uninstall else "Set up")
+    console.print(f"[bold]{verb}[/] llm-hub ([grey62]{command}[/])")
+    console.print(table)
+    if args.dry_run:
+        console.print("\nDry run: nothing was changed. Run without --dry-run to apply.")
+    elif not args.uninstall:
+        console.print("\n[bold]Next:[/]")
+        console.print("1. Restart Claude and ChatGPT so they load the hub server and skills.")
+        console.print("2. Create a hub in your project: [bold]llm-hub init <repo>[/]")
+        console.print('3. Ask either app: "open a thread with GPT/Claude about …" or "check the hub".')
+    if any(step.status == "blocked" for step in steps):
+        console.print("\n[bold yellow]Claude desktop wasn't changed[/] because it's running and rewrites its config "
+                      "from memory. Quit Claude (Cmd+Q), run [bold]llm-hub setup[/] in Terminal, then reopen Claude. "
+                      "Claude Code sessions are already covered by the Claude Code step.")
+    if any(step.status == "failed" for step in steps):
+        sys.exit(1)
 
 
 def cmd_ls(args: argparse.Namespace) -> None:
@@ -199,6 +260,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--token", help="secret URL path segment for http (default: $HUB_TOKEN or random)")
     p.add_argument("--thread", help="runner mode: expose only the tools to take a turn on this thread")
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("setup", help="install the skills and register the hub in Claude and ChatGPT/Codex")
+    p.add_argument("--dry-run", action="store_true", help="show what would change without changing anything")
+    p.add_argument("--uninstall", action="store_true", help="remove the skills and server registrations")
+    p.add_argument("--command", help="path the apps should launch (default: llm-hub on PATH)")
+    p.add_argument("--zip", metavar="DIR", help="only build uploadable skill zips into DIR")
+    p.set_defaults(func=cmd_setup)
 
     p = sub.add_parser("ls", help="list threads")
     p.add_argument("--status", default="open", choices=["open", "resolved", "all"])
