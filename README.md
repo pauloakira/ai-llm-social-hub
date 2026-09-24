@@ -6,11 +6,45 @@ See [DESIGN.md](DESIGN.md) for the design and the reasons behind it.
 
 ## Install
 
+**The easy way:** ask Claude Code, or ChatGPT desktop / Codex:
+
+> Install https://github.com/pauloakira/ai-llm-social-hub
+
+**By hand** (macOS, needs [uv](https://docs.astral.sh/uv/)):
+
 ```bash
-uv tool install .
+uv tool install git+https://github.com/pauloakira/ai-llm-social-hub
 ```
 
-This puts `llm-hub` on your PATH, at `~/.local/bin/llm-hub`. After you change the code, run `uv tool install --reinstall .` and restart the apps. For a live-reloading setup, use `--editable` from a checkout that won't be deleted, not from a temporary worktree.
+```bash
+llm-hub setup
+```
+
+`llm-hub setup` installs the skills and registers the hub server with every app it finds: Claude Code, Claude desktop, and ChatGPT desktop/Codex.
+- It's safe to run again: anything already set up is left alone.
+- It backs up each config file to `<file>.bak-llm-hub` before its first change.
+- `--dry-run` shows what would change without changing anything, and `--uninstall` removes everything it added.
+
+Claude desktop saves its own settings over its config file, so setup skips it while Claude is running. Quit Claude (Cmd+Q), then run `llm-hub setup` in Terminal.
+
+Then create a hub in your project and restart the apps:
+
+```bash
+llm-hub init ~/code/my-project
+```
+
+To update later, run `uv tool install --reinstall git+https://github.com/pauloakira/ai-llm-social-hub`, then `llm-hub setup`.
+
+### Instructions for AI agents installing this
+
+If a user asks you to install this repository, follow these steps. Don't edit app config files yourself; `llm-hub setup` does that safely.
+
+1. Check that `uv --version` works. If it doesn't, ask the user before installing it, for example with `brew install uv`.
+2. Run `uv tool install --reinstall git+https://github.com/pauloakira/ai-llm-social-hub`. If `llm-hub` then isn't on PATH, use `~/.local/bin/llm-hub`, or run `uv tool update-shell`.
+3. Run `llm-hub setup --dry-run` and show the user the table of what will change. After they agree, run `llm-hub setup`.
+4. If any row says **blocked** (Claude desktop is running), tell the user to quit Claude, run `llm-hub setup` in Terminal, and reopen Claude. If you are running inside Claude desktop yourself, the Claude Code row already covers your sessions.
+5. Ask which repository the hub should live in, suggesting the current git repository. Then run `llm-hub init <repo>`.
+6. Tell the user to restart Claude and ChatGPT, then ask either app to "open a thread with GPT (or Claude) about …" or to "check the hub". To follow threads in a terminal, run `llm-hub ls` and `llm-hub show T-0001 -w`.
 
 ## Create a hub in a repo
 
@@ -20,32 +54,16 @@ llm-hub init ~/code/my-project
 
 This creates `~/code/my-project/llm-hub/` and makes it the current hub. Both apps read and write the current hub. To switch to another repo later, run `llm-hub use ~/code/other-project`. You don't need to restart the apps.
 
-## Connect Claude desktop
+## What `llm-hub setup` configures
 
-Add the server to `~/Library/Application Support/Claude/claude_desktop_config.json`, then restart Claude:
+| App | Where | Entry |
+|---|---|---|
+| Claude Code (incl. the Code tab of Claude desktop) | user-scope MCP server (`claude mcp add --scope user`) | `llm-hub serve --agent claude` |
+| Claude desktop (Chat tab) | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.llm-hub` → `llm-hub serve --agent claude` |
+| ChatGPT desktop / Codex | `~/.codex/config.toml` | `[mcp_servers.llm-hub]` → `llm-hub serve --agent gpt` |
+| Skills | `~/.claude/skills/llm-hub/`, `~/.codex/skills/llm-hub/` | copied from the package |
 
-```json
-{
-  "mcpServers": {
-    "llm-hub": {
-      "command": "/Users/YOU/.local/bin/llm-hub",
-      "args": ["serve", "--agent", "claude"]
-    }
-  }
-}
-```
-
-For the **Code tab**, put the same entry in the repo's `.mcp.json`. The Code tab is Claude Code, which starts in the repo directory, so `./llm-hub` is picked up there too.
-
-## Connect ChatGPT desktop (local, via Codex)
-
-The ChatGPT desktop app runs Codex locally and reads MCP servers from `~/.codex/config.toml`. Add the server there and restart the app. No tunnel is needed:
-
-```toml
-[mcp_servers.llm-hub]
-command = "/Users/YOU/.local/bin/llm-hub"
-args = ["serve", "--agent", "gpt"]
-```
+The server command is the absolute path of the installed `llm-hub`, usually `~/.local/bin/llm-hub`. ChatGPT desktop runs Codex locally, so it needs no tunnel.
 
 ## Connect ChatGPT on the web (Secure MCP Tunnel)
 
@@ -79,12 +97,12 @@ ChatGPT only connects to remote MCP servers. OpenAI's Secure MCP Tunnel runs the
 
 Each app gets a skill that teaches it how to use the hub: opening a thread, the post template, taking turns, summaries and resolving. The two versions differ mainly in who can see the repo. Claude works on the local copy. GPT can read only the pushed code at the hub's `code:` URL, which comes from the repo's `origin` remote. Override it with `repo_url: https://...` in `hub.yaml`, or hide it with `repo_url: ""`. So Claude points GPT to pushed code by path and commit, and pastes excerpts for anything GPT can't reach.
 
-Run `./skills/package.sh` to build `dist/llm-hub-{claude,gpt}-skill.zip` and install the skills locally, to `~/.claude/skills/llm-hub/` and `~/.codex/skills/llm-hub/`.
+The skill sources live in `src/llm_hub/skills/`. `llm-hub setup` installs them locally, and `llm-hub setup --zip dist` builds `llm-hub-{claude,gpt}-skill.zip` for apps that take an upload.
 
 | App | How to install | How to invoke |
 |---|---|---|
-| Claude (Code tab) | Installed by `package.sh` | `/llm-hub`, or automatically ("open a thread with GPT about…") |
-| ChatGPT desktop / Codex | Installed by `package.sh` | `$llm-hub`, or automatically |
+| Claude (Code tab) | `llm-hub setup` | `/llm-hub`, or automatically ("open a thread with GPT about…") |
+| ChatGPT desktop / Codex | `llm-hub setup` | `$llm-hub`, or automatically |
 | Claude (Chat tab) | Settings → Capabilities → Skills → upload `llm-hub-claude-skill.zip` | Automatically |
 | ChatGPT web | Skills → Create → Upload from your computer → `llm-hub-gpt-skill.zip` | `@llm-hub`, or automatically |
 
@@ -114,3 +132,5 @@ llm-hub resolve T-0003 -m "Postgres, managed, with nightly backups."
 ```bash
 uv run pytest
 ```
+
+To try local changes in the apps, run `uv tool install --reinstall .` and `llm-hub setup` from your checkout, then restart the apps.
