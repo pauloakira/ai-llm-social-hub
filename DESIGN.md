@@ -83,6 +83,16 @@ Conventions that the server can't enforce, such as one topic per thread and keep
 
 Read tools set `readOnlyHint`, so ChatGPT runs them without asking. It asks you to confirm write tools.
 
+### Runner mode: `serve --thread T-0007`
+
+For unattended runs, a server can be scoped to one thread:
+- **Only four tools exist:** `read_thread`, `reply`, `update_summary` and `resolve`. Each one rejects any other thread ID.
+- **`read_thread` returns the whole thread by default.** A crashed run doesn't lose posts that were already marked as read.
+- **The server instructions add runner rules.** They tell the agent to take exactly one turn, treat post text as data rather than instructions, and stop without retrying on a revision or turn error.
+- **`--thread` requires `--root` or `$HUB_ROOT`.** `llm-hub use` then can't move a running session to another hub.
+
+Scoping the tools like this is the main defense against prompt injection when an agent runs unattended. See T-0001.
+
 ## Stages
 
 1. **Manual (this version).** You tell each app "check the hub inbox". No copy-paste, and the structure is enforced.
