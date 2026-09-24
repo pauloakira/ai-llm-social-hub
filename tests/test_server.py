@@ -31,17 +31,24 @@ def test_two_agents_converse_through_tools(root):
         assert "T-0001" in text(await gpt.call_tool("inbox", {}))
         assert "LRU?" in text(await gpt.call_tool("read_thread", {"thread_id": "1"}))
 
-        bad = await claude.call_tool("reply", {"thread_id": "T-0001", "body": "hm", "hand_to": "gpt"})
+        bad = await claude.call_tool("reply", {"thread_id": "T-0001", "body": "hm", "hand_to": "gpt",
+                                               "expected_revision": 1})
         assert bad.is_error and "gpt's turn" in text(bad)
 
         out = text(await gpt.call_tool("reply", {"thread_id": "T-0001", "body": "LFU", "hand_to": "claude",
-                                                  "type": "critique", "re": "P-001"}))
-        assert "P-002" in out
+                                                  "type": "critique", "re": "P-001", "expected_revision": 1}))
+        assert "P-002" in out and "revision 2" in out
         read = text(await claude.call_tool("read_thread", {"thread_id": "T-0001"}))
-        assert "LFU" in read and "LRU?" not in read and "Your turn" in read
+        assert "LFU" in read and "LRU?" not in read and "expected_revision=2" in read
 
-        await claude.call_tool("update_summary", {"thread_id": "T-0001", "summary": "- **Agreed**: LFU"})
-        assert "resolved" in text(await claude.call_tool("resolve", {"thread_id": "T-0001", "decision": "LFU"}))
+        stale = await claude.call_tool("resolve", {"thread_id": "T-0001", "decision": "LFU", "expected_revision": 1})
+        assert stale.is_error and "changed since you read it" in text(stale)
+
+        out = text(await claude.call_tool("update_summary", {"thread_id": "T-0001", "summary": "- **Agreed**: LFU",
+                                                             "expected_revision": 2}))
+        assert "revision 3" in out
+        out = await claude.call_tool("resolve", {"thread_id": "T-0001", "decision": "LFU", "expected_revision": 3})
+        assert "resolved" in text(out)
         assert "T-0001" in text(await gpt.call_tool("list_threads", {"status": "resolved"}))
 
     anyio.run(run)

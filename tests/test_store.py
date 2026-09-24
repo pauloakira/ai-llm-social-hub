@@ -10,10 +10,15 @@ def hub(tmp_path):
     return Hub.init(tmp_path / "llm-hub", max_turns=4)
 
 
+def rev(hub, tid):
+    return hub.get(tid).revision
+
+
 def test_thread_round_trips_through_markdown(hub):
     t = hub.create_thread("claude", "Retry policy", "Proposal body", "gpt", tags=["ingestion"])
-    hub.reply("gpt", t.id, "Looks good\n### P-9 · fake header\n## Posts", "claude", "critique", re_="P-001")
-    hub.update_summary("claude", t.id, "- **Agreed**: backoff\n## Summary inside")
+    hub.reply("gpt", t.id, "Looks good\n### P-9 · fake header\n## Posts", "claude", "critique", re_="P-001",
+              expected_revision=1)
+    hub.update_summary("claude", t.id, "- **Agreed**: backoff\n## Summary inside", expected_revision=2)
 
     text = t.path.read_text()
     assert "\\### P-9" in text and "\\## Posts" in text  # user text can't break the structure
@@ -40,9 +45,9 @@ def test_turn_taking_is_enforced(hub):
 
 def test_turn_budget_hands_to_human_and_human_resets_it(hub):
     t = hub.create_thread("claude", "Topic", "1", "gpt")  # turn 1
-    hub.reply("gpt", t.id, "2", "claude")
-    hub.reply("claude", t.id, "3", "gpt")
-    _, post, notes = hub.reply("gpt", t.id, "4", "claude")
+    hub.reply("gpt", t.id, "2", "claude", expected_revision=1)
+    hub.reply("claude", t.id, "3", "gpt", expected_revision=2)
+    _, post, notes = hub.reply("gpt", t.id, "4", "claude", expected_revision=3)
     assert post.hand_to == "human" and notes
     assert hub.get(t.id).meta["awaiting"] == "human"
 
@@ -52,11 +57,11 @@ def test_turn_budget_hands_to_human_and_human_resets_it(hub):
 
 def test_resolve_and_reopen(hub):
     t = hub.create_thread("claude", "Topic", "body", "gpt")
-    hub.resolve("gpt", t.id, "We go with option B.")
+    hub.resolve("gpt", t.id, "We go with option B.", expected_revision=1)
     t = hub.get(t.id)
     assert t.meta["status"] == "resolved" and t.posts[-1].type == "decision"
     with pytest.raises(HubError, match="resolved"):
-        hub.reply("claude", t.id, "one more thing", "gpt")
+        hub.reply("claude", t.id, "one more thing", "gpt", expected_revision=rev(hub, t.id))
     _, _, notes = hub.reply("human", t.id, "reopening", "claude")
     assert hub.get(t.id).meta["status"] == "open" and notes
 
@@ -72,7 +77,7 @@ def test_inbox_and_unread(hub):
 
     thread, posts = hub.read("gpt", a.id)
     assert [p.id for p in posts] == ["P-001"]
-    hub.reply("gpt", a.id, "answer", "human")
+    hub.reply("gpt", a.id, "answer", "human", expected_revision=thread.revision)
     _, posts = hub.read("gpt", a.id)
     assert posts == []  # own posts don't count as unread
 
@@ -125,3 +130,57 @@ def test_repo_url_from_git_origin_or_config(tmp_path):
 
     (hub.root / "hub.yaml").write_text("repo_url: ''\n")
     assert Hub(hub.root).repo_url is None  # explicitly hidden
+
+
+def test_every_change_bumps_the_revision(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    assert t.revision == 1
+    thread, _, _ = hub.reply("gpt", t.id, "x", "claude", expected_revision=1)
+    assert thread.revision == 2
+    assert hub.update_summary("claude", t.id, "s", expected_revision=2).revision == 3
+    thread, _, _ = hub.reply("human", t.id, "y", "claude")  # the human needs no revision...
+    assert thread.revision == 4  # ...but still bumps it
+
+
+def test_agent_writes_require_a_current_revision(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    with pytest.raises(HubError, match="Pass expected_revision"):
+        hub.reply("gpt", t.id, "x", "claude")
+    with pytest.raises(HubError, match="changed since you read it"):
+        hub.reply("gpt", t.id, "x", "claude", expected_revision=0)
+
+
+def test_stale_writer_cannot_overwrite_summary_or_reply(hub):
+    """P-004 on T-0001: an orphaned run and a fresh run both act on the same turn."""
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    seen = rev(hub, t.id)  # both runs read revision 1
+    hub.update_summary("gpt", t.id, "fresh run's summary", expected_revision=seen)
+    with pytest.raises(HubError, match="changed since you read it"):
+        hub.update_summary("gpt", t.id, "orphan's summary", expected_revision=seen)
+    with pytest.raises(HubError, match="changed since you read it"):
+        hub.reply("gpt", t.id, "orphan's reply", "claude", expected_revision=seen)
+    assert hub.get(t.id).summary == "fresh run's summary"
+
+
+def test_human_post_invalidates_in_flight_agent(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    seen = rev(hub, t.id)
+    hub.reply("human", t.id, "wait, new constraint", "gpt")
+    with pytest.raises(HubError, match="changed since you read it"):
+        hub.reply("gpt", t.id, "answer based on stale state", "claude", expected_revision=seen)
+
+
+def test_summary_requires_turn(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    with pytest.raises(HubError, match="gpt's turn"):
+        hub.update_summary("claude", t.id, "sneaky", expected_revision=1)
+    hub.update_summary("human", t.id, "the human can always edit it")
+
+
+def test_threads_without_revision_default_to_zero(hub):
+    t = hub.create_thread("claude", "Old", "body", "gpt")
+    t.meta.pop("revision")
+    t.path.write_text(t.render())
+    assert rev(hub, t.id) == 0
+    thread, _, _ = hub.reply("gpt", t.id, "x", "claude", expected_revision=0)
+    assert thread.revision == 1

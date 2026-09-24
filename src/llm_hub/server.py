@@ -53,7 +53,8 @@ def format_header(thread: Thread, repo_url: str | None = None) -> str:
     m = thread.meta
     lines = [
         f"# {thread.id} · {thread.title}",
-        f"status: {m['status']} · awaiting: {m['awaiting']} · turns: {m.get('turns', 0)}/{m.get('max_turns')}"
+        f"status: {m['status']} · awaiting: {m['awaiting']} · revision: {thread.revision}"
+        f" · turns: {m.get('turns', 0)}/{m.get('max_turns')}"
         f" · participants: {', '.join(m.get('participants') or [])}",
     ]
     if m.get("tags"):
@@ -127,7 +128,10 @@ def build_server(agent: str, hub_root: Callable[[], Path]) -> MCPServer:
         parts.append("## Posts\n\n" + ("\n\n".join(format_post(p) for p in posts) or "_No new posts._"))
         m = thread.meta
         if m["status"] == "open" and m["awaiting"] in (agent, NOBODY):
-            parts.append(f"**Your turn.** Reply with `reply(thread_id='{thread.id}', ..., hand_to=...)`.")
+            parts.append(
+                f"**Your turn.** Write with `expected_revision={thread.revision}`, "
+                f"e.g. `reply(thread_id='{thread.id}', ..., hand_to=..., expected_revision={thread.revision})`."
+            )
         else:
             parts.append(f"Not your turn (awaiting: {m['awaiting']}, status: {m['status']}).")
         return "\n\n".join(parts)
@@ -149,26 +153,39 @@ def build_server(agent: str, hub_root: Callable[[], Path]) -> MCPServer:
 
     @server.tool(annotations=WRITE)
     @_hub_errors_to_agent
-    def reply(thread_id: str, body: str, hand_to: str, type: PostType = "answer", re: str | None = None) -> str:
+    def reply(
+        thread_id: str,
+        body: str,
+        hand_to: str,
+        expected_revision: int,
+        type: PostType = "answer",
+        re: str | None = None,
+    ) -> str:
         """Post in a thread when it's your turn. hand_to: who goes next (another agent, 'human' when you
-        need a decision or input, or 'none'). type: proposal | question | answer | critique | decision | note.
+        need a decision or input, or 'none'). expected_revision: the revision read_thread showed; the post is
+        rejected if the thread changed since. type: proposal | question | answer | critique | decision | note.
         re: the post ID you're responding to, e.g. 'P-003'."""
-        thread, post, notes = hub().reply(agent, thread_id, body, hand_to, type, re)
-        return "\n".join([f"Posted {post.id} on {thread.id}. The turn is with {post.hand_to}.", *notes])
+        thread, post, notes = hub().reply(
+            agent, thread_id, body, hand_to, type, re, expected_revision=expected_revision
+        )
+        return "\n".join(
+            [f"Posted {post.id} on {thread.id} (now revision {thread.revision}). The turn is with {post.hand_to}.", *notes]
+        )
 
     @server.tool(annotations=WRITE)
     @_hub_errors_to_agent
-    def update_summary(thread_id: str, summary: str) -> str:
-        """Replace the thread's pinned summary. Use bullets under **Agreed**, **Open** and **Next**."""
-        thread = hub().update_summary(agent, thread_id, summary)
-        return f"Summary of {thread.id} updated."
+    def update_summary(thread_id: str, summary: str, expected_revision: int) -> str:
+        """Replace the thread's pinned summary, on your turn. Use bullets under **Agreed**, **Open** and **Next**.
+        expected_revision: the revision read_thread showed. This bumps the revision; use the returned one next."""
+        thread = hub().update_summary(agent, thread_id, summary, expected_revision=expected_revision)
+        return f"Summary of {thread.id} updated (now revision {thread.revision}; pass it to your next write)."
 
     @server.tool(annotations=WRITE)
     @_hub_errors_to_agent
-    def resolve(thread_id: str, decision: str) -> str:
+    def resolve(thread_id: str, decision: str, expected_revision: int) -> str:
         """Close a thread when its goal is met (only when it's your turn). `decision` is the final outcome
-        and is posted as a decision post."""
-        thread = hub().resolve(agent, thread_id, decision)
+        and is posted as a decision post. expected_revision: the revision read_thread showed."""
+        thread = hub().resolve(agent, thread_id, decision, expected_revision=expected_revision)
         return f"{thread.id} resolved."
 
     @server.tool(annotations=READ_ONLY)
