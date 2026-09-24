@@ -32,11 +32,9 @@ def test_thread_round_trips_through_markdown(hub):
 
 
 def test_turn_taking_is_enforced(hub):
-    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    t = hub.create_thread("human", "Topic", "body", "gpt")
     with pytest.raises(HubError, match="gpt's turn"):
         hub.reply("claude", t.id, "again", "gpt")
-    with pytest.raises(HubError, match="yourself"):
-        hub.reply("gpt", t.id, "x", "gpt")
     with pytest.raises(HubError, match="Unknown hand_to"):
         hub.reply("gpt", t.id, "x", "gemini")
     hub.reply("human", t.id, "the human can always post", "claude")
@@ -171,7 +169,7 @@ def test_human_post_invalidates_in_flight_agent(hub):
 
 
 def test_summary_requires_turn(hub):
-    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    t = hub.create_thread("human", "Topic", "body", "gpt")
     with pytest.raises(HubError, match="gpt's turn"):
         hub.update_summary("claude", t.id, "sneaky", expected_revision=1)
     hub.update_summary("human", t.id, "the human can always edit it")
@@ -184,3 +182,48 @@ def test_threads_without_revision_default_to_zero(hub):
     assert rev(hub, t.id) == 0
     thread, _, _ = hub.reply("gpt", t.id, "x", "claude", expected_revision=0)
     assert thread.revision == 1
+
+
+def test_agent_can_post_twice_in_a_row(tmp_path):
+    hub = Hub.init(tmp_path / "big-budget", max_turns=8)
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    # Keep the turn: hand it to yourself, then post again.
+    thread, post, _ = hub.reply("gpt", t.id, "part 1", "gpt", expected_revision=1)
+    assert post.hand_to == "gpt" and thread.meta["awaiting"] == "gpt"
+    thread, _, _ = hub.reply("gpt", t.id, "part 2", "claude", expected_revision=thread.revision)
+    # Follow up after handing off, as long as nobody else has posted yet.
+    thread, post, _ = hub.reply("gpt", t.id, "one more thing", "claude", expected_revision=thread.revision)
+    assert [p.author for p in thread.posts] == ["claude", "gpt", "gpt", "gpt"]
+    assert thread.meta["awaiting"] == "claude"
+
+
+def test_follow_up_ends_once_someone_else_posts(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    thread, _, _ = hub.reply("gpt", t.id, "answer", "claude", expected_revision=1)
+    thread, _, _ = hub.reply("claude", t.id, "reply", "human", expected_revision=thread.revision)
+    with pytest.raises(HubError, match="human's turn"):
+        hub.reply("gpt", t.id, "late addition", "claude", expected_revision=thread.revision)
+
+
+def test_follow_up_invalidates_the_other_agents_stale_read(hub):
+    t = hub.create_thread("claude", "Topic", "body", "gpt")
+    thread, _, _ = hub.reply("gpt", t.id, "answer", "claude", expected_revision=1)
+    claude_saw = thread.revision
+    hub.reply("gpt", t.id, "correction", "claude", expected_revision=claude_saw)
+    with pytest.raises(HubError, match="changed since you read it"):
+        hub.reply("claude", t.id, "reply to the old state", "gpt", expected_revision=claude_saw)
+
+
+def test_consecutive_posts_count_toward_the_budget(hub):  # max_turns=4
+    t = hub.create_thread("claude", "Topic", "1", "gpt")  # turn 1
+    rev = 1
+    for i in range(2, 4):
+        thread, _, _ = hub.reply("claude", t.id, str(i), "gpt", expected_revision=rev)
+        rev = thread.revision
+    _, post, notes = hub.reply("claude", t.id, "4", "gpt", expected_revision=rev)
+    assert post.hand_to == "human" and notes
+
+
+def test_new_thread_cannot_go_to_its_author(hub):
+    with pytest.raises(HubError, match="someone else"):
+        hub.create_thread("claude", "Topic", "body", "claude")

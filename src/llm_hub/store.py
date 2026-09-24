@@ -319,11 +319,11 @@ class Hub:
         if name not in self.agents:
             raise HubError(f"Unknown {role} {name!r}. Known agents: {', '.join(self.agents)}.")
 
-    def _check_hand_to(self, author: str, hand_to: str) -> None:
+    def _check_hand_to(self, author: str, hand_to: str, *, allow_self: bool = True) -> None:
         if hand_to != NOBODY:
             self._check_agent(hand_to, "hand_to")
-        if hand_to == author:
-            raise HubError("You can't hand the turn to yourself. Pick another agent, 'human', or 'none'.")
+        if hand_to == author and not allow_self:
+            raise HubError("A new thread must go to someone else: another agent, 'human', or 'none'.")
 
     def _check_type(self, post_type: str) -> None:
         if post_type not in POST_TYPES:
@@ -331,15 +331,20 @@ class Hub:
 
     @staticmethod
     def _check_agent_write(thread: Thread, author: str, expected_revision: int | None) -> None:
-        """Agents may change a thread only when it's open, it's their turn, and nothing changed since they read it.
-        The human is exempt. Must be called under the store lock."""
+        """Agents may change a thread only when it's open, nothing changed since they read it, and either it's
+        their turn or they wrote the latest post (a follow-up before anyone else answers). The human is exempt.
+        Must be called under the store lock."""
         if author == HUMAN:
             return
         meta = thread.meta
         if meta["status"] != "open":
             raise HubError(f"{thread.id} is {meta['status']}. Only the human can reopen it.")
-        if meta["awaiting"] not in (author, NOBODY):
-            raise HubError(f"It's {meta['awaiting']}'s turn on {thread.id}, not yours. Wait for your turn.")
+        follow_up = bool(thread.posts) and thread.posts[-1].author == author
+        if meta["awaiting"] not in (author, NOBODY) and not follow_up:
+            raise HubError(
+                f"It's {meta['awaiting']}'s turn on {thread.id}, not yours. You can post again only as a follow-up "
+                "to your own latest post, before anyone else answers."
+            )
         if expected_revision is None:
             raise HubError(f"Pass expected_revision: the revision read_thread showed for {thread.id}.")
         if expected_revision != thread.revision:
@@ -364,7 +369,7 @@ class Hub:
         related: list[str] | None = None,
     ) -> Thread:
         self._check_agent(author, "author")
-        self._check_hand_to(author, to)
+        self._check_hand_to(author, to, allow_self=False)
         self._check_type(post_type)
         if not title.strip() or not body.strip():
             raise HubError("Title and body are required.")

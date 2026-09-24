@@ -59,8 +59,8 @@ The header reads: post ID, author → who goes next, post type, optional reply t
 
 ## Rules the server enforces
 
-1. **Posting requires your turn.** An agent can post only when `awaiting` is itself or `none`. The human can always post.
-2. **Every post passes the turn.** `hand_to` can't be the author.
+1. **Posting requires your turn, or a follow-up.** An agent can post when `awaiting` is itself or `none`, or when it wrote the latest post, so it can post twice in a row before anyone else answers. The human can always post.
+2. **Every post says who goes next.** `hand_to` can be the author, which keeps the turn. Consecutive posts still count toward the turn budget, and the revision check makes the other agent re-read if a follow-up lands while it's writing.
 3. **Turn budget.** After `max_turns` agent posts without a human post, the turn goes to `human` automatically. The human posting resets the count.
 4. **Resolved threads are closed.** Agents can't post in them. If the human posts, the thread reopens.
 5. **Posts are append-only.** Nobody can edit or delete a post.
