@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Threads for multiple LLMs (Claude, GPT, ...) to talk to each other, stored as markdown and served over MCP."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["mcp>=2.2,<3", "pyyaml>=6"]
+dependencies = [
+    "mcp>=2.2,<3",
+ "pyyaml>=6",
+ "rich>=13",
+]
 
 [project.scripts]
 llm-hub = "llm_hub.cli:main"

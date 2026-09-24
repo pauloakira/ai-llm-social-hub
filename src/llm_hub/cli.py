@@ -8,10 +8,14 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+from rich.console import Console
 
 from .server import build_server, format_header, format_line, format_post
 from .store import HUMAN, POST_TYPES, Hub, HubError
+from .view import render_thread, render_thread_list
 
 CURRENT_FILE = Path(os.environ.get("LLM_HUB_HOME", "~/.llm-hub")).expanduser() / "current"
 
@@ -100,20 +104,53 @@ def cmd_serve(args: argparse.Namespace) -> None:
 def cmd_ls(args: argparse.Namespace) -> None:
     hub = Hub(resolve_root(args.root))
     threads = hub.threads(status=args.status, tag=args.tag)
-    for thread in threads:
-        mark = " ◀ your turn" if thread.meta.get("awaiting") == HUMAN else ""
-        print(format_line(thread, mark))
-    if not threads:
-        print("No threads.")
+    if args.raw:
+        for thread in threads:
+            mark = " ◀ your turn" if thread.meta.get("awaiting") == HUMAN else ""
+            print(format_line(thread, mark))
+        if not threads:
+            print("No threads.")
+        return
+    Console().print(render_thread_list(threads))
+
+
+def _show_once(hub: Hub, args: argparse.Namespace, console: Console) -> Path | None:
+    thread, posts = hub.read(HUMAN, args.thread, only_new=args.new)
+    hidden = len(thread.posts) - len(posts)
+    if args.last and len(posts) > args.last:
+        hidden += len(posts) - args.last
+        posts = posts[-args.last :]
+    if args.raw:
+        print(format_header(thread))
+        print("\n## Summary\n\n" + (thread.summary or "_No summary yet._"))
+        print("\n## Posts\n")
+        print("\n\n".join(format_post(p) for p in posts) or "_No new posts._")
+    else:
+        note = f"{hidden} earlier post{'s' if hidden != 1 else ''} hidden" if hidden else None
+        console.print(render_thread(thread, posts, hub.repo_url, hidden_note=note))
+    return thread.path
 
 
 def cmd_show(args: argparse.Namespace) -> None:
     hub = Hub(resolve_root(args.root))
-    thread, posts = hub.read(HUMAN, args.thread, only_new=args.new)
-    print(format_header(thread))
-    print("\n## Summary\n\n" + (thread.summary or "_No summary yet._"))
-    print("\n## Posts\n")
-    print("\n\n".join(format_post(p) for p in posts) or "_No new posts._")
+    console = Console()
+    if not args.watch:
+        _show_once(hub, args, console)
+        return
+    args.new = False  # a live view always shows the thread, not just what's unseen
+    last_mtime = None
+    try:
+        while True:
+            path = hub.get(args.thread).path
+            mtime = path.stat().st_mtime if path else None
+            if mtime != last_mtime:
+                last_mtime = mtime
+                console.clear()
+                _show_once(hub, args, console)
+                console.print(f"[grey50]Watching {args.thread} · refreshed {time.strftime('%H:%M:%S')} · Ctrl+C to stop[/]")
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
 
 
 def cmd_new(args: argparse.Namespace) -> None:
@@ -166,11 +203,16 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("ls", help="list threads")
     p.add_argument("--status", default="open", choices=["open", "resolved", "all"])
     p.add_argument("--tag")
+    p.add_argument("--raw", action="store_true", help="plain text, one line per thread")
     p.set_defaults(func=cmd_ls)
 
-    p = sub.add_parser("show", help="print a thread")
+    p = sub.add_parser("show", help="show a thread, formatted for the terminal")
     p.add_argument("thread")
     p.add_argument("--new", action="store_true", help="only posts you haven't seen")
+    p.add_argument("--last", type=int, metavar="N", help="only the last N posts")
+    p.add_argument("-w", "--watch", action="store_true", help="keep open and redraw when the thread changes")
+    p.add_argument("--interval", type=float, default=1.0, help=argparse.SUPPRESS)
+    p.add_argument("--raw", action="store_true", help="plain markdown instead of formatted output")
     p.set_defaults(func=cmd_show)
 
     body_help = "post body (default: stdin, or $EDITOR)"
