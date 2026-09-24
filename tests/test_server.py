@@ -31,7 +31,8 @@ def test_two_agents_converse_through_tools(root):
         assert "T-0001" in text(await gpt.call_tool("inbox", {}))
         assert "LRU?" in text(await gpt.call_tool("read_thread", {"thread_id": "1"}))
 
-        bad = await claude.call_tool("reply", {"thread_id": "T-0001", "body": "hm", "hand_to": "gpt",
+        Hub(root).create_thread("human", "Human asks gpt", "question", "gpt")  # T-0002
+        bad = await claude.call_tool("reply", {"thread_id": "T-0002", "body": "hm", "hand_to": "gpt",
                                                "expected_revision": 1})
         assert bad.is_error and "gpt's turn" in text(bad)
 

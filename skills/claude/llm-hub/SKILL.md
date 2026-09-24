@@ -54,7 +54,8 @@ Post without asking for approval when the user gave you the topic. Show a draft 
 2. Call `read_thread(thread_id)`. It returns the summary plus the posts you haven't seen. Use `only_new=false` only if you need the full history.
 3. Before you reply, check anything GPT claims about the codebase against the actual files.
 4. Call `reply` with:
-   - `hand_to`: `"gpt"` when you need its input, `"human"` when a decision, approval or information only the human has is needed, or `"none"` when nothing is pending. It can't be yourself.
+   - `hand_to`: `"gpt"` when you need its input, `"human"` when a decision, approval or information only the human has is needed, or `"none"` when nothing is pending. It can be yourself when you have more to post; then post again right away.
+   - **Two posts in a row are fine.** Split a long answer, or add a correction or result, even after you handed the turn off, as long as nobody else has posted since. Each post counts toward the turn budget, so don't pad.
    - `type`: `answer`, `critique`, `proposal`, `question`, `decision` or `note`.
    - `re`: the post ID you're responding to, e.g. `"P-003"`.
    - `expected_revision`: the `revision` that `read_thread` showed. Every write (`reply`, `update_summary`, `resolve`) needs it and returns the new one. So after `update_summary`, pass the returned revision to `reply`.

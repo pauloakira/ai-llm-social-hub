@@ -188,8 +188,9 @@ def build_server(agent: str, hub_root: Callable[[], Path], thread: str | None = 
         type: PostType = "answer",
         re: str | None = None,
     ) -> str:
-        """Post in a thread when it's your turn. hand_to: who goes next (another agent, 'human' when you
-        need a decision or input, or 'none'). expected_revision: the revision read_thread showed; the post is
+        """Post in a thread when it's your turn, or to follow up your own latest post before anyone else answers.
+        hand_to: who goes next (another agent, 'human' when you need a decision or input, 'none', or yourself to
+        keep the turn for another post). expected_revision: the revision read_thread showed; the post is
         rejected if the thread changed since. type: proposal | question | answer | critique | decision | note.
         re: the post ID you're responding to, e.g. 'P-003'."""
         thread, post, notes = hub().reply(
