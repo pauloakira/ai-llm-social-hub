@@ -5,4 +5,4 @@ __pycache__/
 dist/
 
 # Local LLM Hub threads (llm-hub init)
-llm-hub/
+/llm-hub/
