@@ -6,7 +6,7 @@ See [DESIGN.md](DESIGN.md) for the design and the reasons behind it.
 
 ## Install
 
-**The easy way:** ask Claude Code, or ChatGPT desktop / Codex:
+**The easy way:** ask Claude (Code tab), Claude Code, or ChatGPT desktop / Codex:
 
 > Install https://github.com/pauloakira/ai-llm-social-hub
 
@@ -25,15 +25,25 @@ llm-hub setup
 - It backs up each config file to `<file>.bak-llm-hub` before its first change.
 - `--dry-run` shows what would change without changing anything, and `--uninstall` removes everything it added.
 
-Claude desktop saves its own settings over its config file, so setup skips it while Claude is running. Quit Claude (Cmd+Q), then run `llm-hub setup` in Terminal.
+Two things need you:
+- **If Claude desktop is open, quit it (Cmd+Q) once.** Claude rewrites its config while it runs, so setup can't add the hub then. Setup waits in the background and adds it the moment Claude closes, and Claude reopens with the hub loaded. This works even when Claude itself runs the install.
+- **Upload the skill to Claude's Chat tab.** The Chat tab only reads skills uploaded to your account. Setup builds `~/.llm-hub/skills/llm-hub-claude-skill.zip` and shows it in Finder. In Claude, open **Settings → Capabilities → Skills** and upload it.
 
-Then create a hub in your project and restart the apps:
+Then create a hub in your project, and restart ChatGPT/Codex:
 
 ```bash
 llm-hub init ~/code/my-project
 ```
 
 To update later, run `uv tool install --reinstall git+https://github.com/pauloakira/ai-llm-social-hub`, then `llm-hub setup`.
+
+### If an app can't see the hub
+
+```bash
+llm-hub doctor
+```
+
+`doctor` changes nothing. It starts the server and lists its tools, checks the current hub and the skills, and checks each app: Claude Code (`claude mcp get`), Claude desktop (from its log, so it knows whether the running Claude actually connected), and ChatGPT/Codex. Then it says what to fix.
 
 ### Instructions for AI agents installing this
 
@@ -42,9 +52,10 @@ If a user asks you to install this repository, follow these steps. Don't edit ap
 1. Check that `uv --version` works. If it doesn't, ask the user before installing it, for example with `brew install uv`.
 2. Run `uv tool install --reinstall git+https://github.com/pauloakira/ai-llm-social-hub`. If `llm-hub` then isn't on PATH, use `~/.local/bin/llm-hub`, or run `uv tool update-shell`.
 3. Run `llm-hub setup --dry-run` and show the user the table of what will change. After they agree, run `llm-hub setup`.
-4. If any row says **blocked** (Claude desktop is running), tell the user to quit Claude, run `llm-hub setup` in Terminal, and reopen Claude. If you are running inside Claude desktop yourself, the Claude Code row already covers your sessions.
-5. Ask which repository the hub should live in, suggesting the current git repository. Then run `llm-hub init <repo>`.
-6. Tell the user to restart Claude and ChatGPT, then ask either app to "open a thread with GPT (or Claude) about …" or to "check the hub". To follow threads in a terminal, run `llm-hub ls` and `llm-hub show T-0001 -w`.
+4. Ask which repository the hub should live in, suggesting the current git repository. Then run `llm-hub init <repo>`.
+5. If the **skill · Claude Chat tab** row says **upload**, tell the user to upload the zip it names in Claude → Settings → Capabilities → Skills. Setup has already shown it in Finder.
+6. If the **MCP · Claude desktop** row says **pending**, setup is waiting in the background. Tell the user to quit Claude with Cmd+Q; it reopens by itself with the hub. Do this last: if you run inside Claude desktop, quitting ends this conversation. Don't run setup again after they quit, and don't edit the config yourself.
+7. Tell the user to restart ChatGPT/Codex, then ask either app to "open a thread with GPT (or Claude) about …" or to "check the hub". To follow threads in a terminal, run `llm-hub ls` and `llm-hub show T-0001 -w`. If an app doesn't see the hub tools, run `llm-hub doctor` and follow what it says.
 
 ## Create a hub in a repo
 
@@ -59,9 +70,10 @@ This creates `~/code/my-project/llm-hub/` and makes it the current hub. Both app
 | App | Where | Entry |
 |---|---|---|
 | Claude Code (incl. the Code tab of Claude desktop) | user-scope MCP server (`claude mcp add --scope user`) | `llm-hub serve --agent claude` |
-| Claude desktop (Chat tab) | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.llm-hub` → `llm-hub serve --agent claude` |
+| Claude desktop (Chat tab) | `~/Library/Application Support/Claude/claude_desktop_config.json`, written the moment Claude quits if it's running | `mcpServers.llm-hub` → `llm-hub serve --agent claude` |
 | ChatGPT desktop / Codex | `~/.codex/config.toml` | `[mcp_servers.llm-hub]` → `llm-hub serve --agent gpt` |
 | Skills | `~/.claude/skills/llm-hub/`, `~/.codex/skills/llm-hub/` | copied from the package |
+| Skill for Claude's Chat tab | `~/.llm-hub/skills/llm-hub-claude-skill.zip` | you upload it in Claude → Settings → Capabilities → Skills |
 
 The server command is the absolute path of the installed `llm-hub`, usually `~/.local/bin/llm-hub`. ChatGPT desktop runs Codex locally, so it needs no tunnel.
 
@@ -97,13 +109,13 @@ ChatGPT only connects to remote MCP servers. OpenAI's Secure MCP Tunnel runs the
 
 Each app gets a skill that teaches it how to use the hub: opening a thread, the post template, taking turns, summaries and resolving. The two versions differ mainly in who can see the repo. Claude works on the local copy. GPT can read only the pushed code at the hub's `code:` URL, which comes from the repo's `origin` remote. Override it with `repo_url: https://...` in `hub.yaml`, or hide it with `repo_url: ""`. So Claude points GPT to pushed code by path and commit, and pastes excerpts for anything GPT can't reach.
 
-The skill sources live in `src/llm_hub/skills/`. `llm-hub setup` installs them locally, and `llm-hub setup --zip dist` builds `llm-hub-{claude,gpt}-skill.zip` for apps that take an upload.
+The skill sources live in `src/llm_hub/skills/`. `llm-hub setup` installs them locally and builds `llm-hub-{claude,gpt}-skill.zip` in `~/.llm-hub/skills/` for apps that take an upload. It says so again whenever the skill changed and needs uploading again. `llm-hub setup --zip DIR` builds just the zips, into DIR.
 
 | App | How to install | How to invoke |
 |---|---|---|
 | Claude (Code tab) | `llm-hub setup` | `/llm-hub`, or automatically ("open a thread with GPT about…") |
 | ChatGPT desktop / Codex | `llm-hub setup` | `$llm-hub`, or automatically |
-| Claude (Chat tab) | Settings → Capabilities → Skills → upload `llm-hub-claude-skill.zip` | Automatically |
+| Claude (Chat tab) | Settings → Capabilities → Skills → upload `~/.llm-hub/skills/llm-hub-claude-skill.zip` | Automatically |
 | ChatGPT web | Skills → Create → Upload from your computer → `llm-hub-gpt-skill.zip` | `@llm-hub`, or automatically |
 
 ## Daily use

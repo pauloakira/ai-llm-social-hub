@@ -117,11 +117,25 @@ def _llm_hub_command() -> str | None:
     return None
 
 
-def cmd_setup(args: argparse.Namespace) -> None:
-    from rich.console import Console
+STATUS_COLORS = {"added": "green", "updated": "yellow", "removed": "yellow", "present": "grey62", "absent": "grey62",
+                 "skipped": "grey50", "pending": "bold yellow", "upload": "bold yellow", "failed": "bold red",
+                 "ok": "green", "warn": "bold yellow", "fail": "bold red", "skip": "grey50", "info": "grey62"}
+
+
+def _table(rows: list[tuple[str, str, str]]):
     from rich.table import Table
 
-    from .setup import run_setup, skill_zips
+    table = Table(box=None, pad_edge=False, header_style="bold grey62")
+    for col in ("Target", "Status", "Where"):
+        table.add_column(col)
+    for target, status, detail in rows:
+        table.add_row(target, f"[{STATUS_COLORS.get(status, '')}]{status}[/]", detail)
+    return table
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    from . import desktop
+    from .setup import claude_desktop, run_setup, skill_zip_dir, skill_zips
 
     console = Console()
     if args.zip:
@@ -134,31 +148,57 @@ def cmd_setup(args: argparse.Namespace) -> None:
             "No permanent llm-hub install found (this one runs from a temporary environment). Install it first: "
             "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub, then run llm-hub setup."
         )
-    steps = run_setup(
-        Path.home(), command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall
-    )
-    colors = {"added": "green", "updated": "yellow", "removed": "yellow", "present": "grey62",
-              "absent": "grey62", "skipped": "grey50", "blocked": "bold yellow", "failed": "bold red"}
-    table = Table(box=None, pad_edge=False, header_style="bold grey62")
-    for col in ("Target", "Status", "Where"):
-        table.add_column(col)
-    for step in steps:
-        table.add_row(step.target, f"[{colors.get(step.status, '')}]{step.status}[/]", step.detail)
+    home = Path.home()
+    if args.finish_claude_desktop:
+        apply = lambda: claude_desktop(home, command, dry_run=False, uninstall=args.uninstall).status  # noqa: E731
+        sys.exit(0 if desktop.finish(home, apply, args.uninstall) else 1)
+    steps = run_setup(home, command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall)
+    by_status = {step.status for step in steps}
+    if not args.dry_run:
+        if "pending" in by_status:
+            desktop.start(home, command, args.uninstall)
+        else:
+            desktop.stop(home)  # an older finisher would undo this run
     verb = "Would change" if args.dry_run else ("Uninstalled" if args.uninstall else "Set up")
     console.print(f"[bold]{verb}[/] llm-hub ([grey62]{command}[/])")
-    console.print(table)
+    console.print(_table([(s.target, s.status, s.detail) for s in steps]))
     if args.dry_run:
         console.print("\nDry run: nothing was changed. Run without --dry-run to apply.")
     elif not args.uninstall:
         console.print("\n[bold]Next:[/]")
-        console.print("1. Restart Claude and ChatGPT so they load the hub server and skills.")
+        console.print("1. Restart ChatGPT/Codex, and start a new Claude Code session, so they load the hub.")
         console.print("2. Create a hub in your project: [bold]llm-hub init <repo>[/]")
         console.print('3. Ask either app: "open a thread with GPT/Claude about …" or "check the hub".')
-    if any(step.status == "blocked" for step in steps):
-        console.print("\n[bold yellow]Claude desktop wasn't changed[/] because it's running and rewrites its config "
-                      "from memory. Quit Claude (Cmd+Q), run [bold]llm-hub setup[/] in Terminal, then reopen Claude. "
-                      "Claude Code sessions are already covered by the Claude Code step.")
-    if any(step.status == "failed" for step in steps):
+        console.print("If something doesn't work, run [bold]llm-hub doctor[/].")
+    if "pending" in by_status:
+        when = "Setup will finish" if args.dry_run else "Setup finishes"
+        console.print(f"\n[bold yellow]Quit Claude (Cmd+Q) to finish Claude desktop.[/] Claude rewrites its config while it "
+                      f"runs, so the entry can only be changed while it's closed. {when} in the background the moment "
+                      "Claude quits, and Claude reopens by itself. Claude Code sessions don't need this.")
+    if "upload" in by_status and not args.dry_run:
+        zip_path = str(skill_zip_dir(home) / "llm-hub-claude-skill.zip")
+        console.print(f"\n[bold yellow]Upload the skill to Claude's Chat tab:[/] in Claude, open Settings → "
+                      f"Capabilities → Skills and upload [bold]{zip_path}[/] (shown in Finder).")
+        if sys.platform == "darwin":
+            subprocess.run(["open", "-R", zip_path], capture_output=True)
+    if "failed" in by_status:
+        sys.exit(1)
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    from .doctor import run_doctor
+
+    checks = run_doctor(Path.home(), args.command or _llm_hub_command(), shutil.which("claude"), lambda: resolve_root(args.root))
+    console = Console()
+    console.print(_table([(c.name, c.status, c.detail) for c in checks]))
+    fixes = [c for c in checks if c.fix and c.status in ("fail", "warn", "info")]
+    if fixes:
+        console.print("\n[bold]To fix:[/]")
+        for n, check in enumerate(fixes, 1):
+            console.print(f"{n}. [bold]{check.name}[/]: {check.fix}")
+    elif not any(c.status == "fail" for c in checks):
+        console.print("\nEverything checks out.")
+    if any(c.status == "fail" for c in checks):
         sys.exit(1)
 
 
@@ -266,7 +306,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--uninstall", action="store_true", help="remove the skills and server registrations")
     p.add_argument("--command", help="path the apps should launch (default: llm-hub on PATH)")
     p.add_argument("--zip", metavar="DIR", help="only build uploadable skill zips into DIR")
+    p.add_argument("--finish-claude-desktop", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_setup)
+
+    p = sub.add_parser("doctor", help="check that every app can reach the hub, and say how to fix what can't")
+    p.add_argument("--command", help="path the apps launch (default: llm-hub on PATH)")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("ls", help="list threads")
     p.add_argument("--status", default="open", choices=["open", "resolved", "all"])
