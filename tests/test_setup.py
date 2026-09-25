@@ -1,6 +1,7 @@
 import json
 import tomllib
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -62,7 +63,10 @@ def desktop_config(home):
 
 def test_fresh_install_then_idempotent(home, claude_bin):
     steps = setup(home, claude_bin)
+    chat = steps.pop("skill · Claude Chat tab")
     assert {s.status for s in steps.values()} == {"added"}, steps
+    assert chat.status == "upload" and "Settings → Capabilities → Skills" in chat.detail
+    assert "llm-hub/SKILL.md" in zipfile.ZipFile(home / ".llm-hub/skills/llm-hub-claude-skill.zip").namelist()
 
     assert (home / ".claude/skills/llm-hub/SKILL.md").exists()
     assert (home / ".codex/skills/llm-hub/agents/openai.yaml").exists()
@@ -96,28 +100,64 @@ def test_new_command_path_updates_every_registration(home, claude_bin):
 def test_dry_run_changes_nothing(home, claude_bin):
     before = (home / ".codex/config.toml").read_text(), desktop_config(home)
     steps = setup(home, claude_bin, dry_run=True)
+    assert steps.pop("skill · Claude Chat tab").status == "upload"
     assert {s.status for s in steps.values()} == {"added"}
     assert ((home / ".codex/config.toml").read_text(), desktop_config(home)) == before
-    assert not (home / ".claude/skills/llm-hub").exists()
+    assert not (home / ".claude/skills/llm-hub").exists() and not (home / ".llm-hub").exists()
 
 
 def test_uninstall_removes_everything_and_keeps_the_rest(home, claude_bin):
     setup(home, claude_bin)
     steps = setup(home, claude_bin, uninstall=True)
     assert {s.status for s in steps.values()} == {"removed"}, steps
-    assert not (home / ".claude/skills/llm-hub").exists()
+    assert not (home / ".claude/skills/llm-hub").exists() and not (home / ".llm-hub/skills").exists()
     assert "llm-hub" not in desktop_config(home)["mcpServers"]
     codex = tomllib.loads((home / ".codex/config.toml").read_text())
     assert "llm-hub" not in codex["mcp_servers"] and codex["mcp_servers"]["node_repl"]["env"] == {"A": "1"}
     assert {s.status for s in setup(home, claude_bin, uninstall=True).values()} == {"absent"}
 
 
-def test_running_claude_desktop_is_not_edited(home, claude_bin):
+def test_running_claude_desktop_is_deferred_not_edited(home, claude_bin):
     before = desktop_config(home)
-    steps = setup(home, claude_bin, claude_running=True)
-    assert steps["MCP · Claude desktop"].status == "blocked"
+    steps = setup(home, claude_bin, claude_running=True, claude_loaded=False)
+    assert steps["MCP · Claude desktop"].status == "pending"
+    assert "quit Claude" in steps["MCP · Claude desktop"].detail
     assert desktop_config(home) == before
     assert steps["MCP · ChatGPT/Codex"].status == "added"
+
+
+def test_entry_in_file_but_not_loaded_is_still_pending(home, claude_bin):
+    setup(home, claude_bin)
+    # Claude started before the entry was written: its in-memory copy lacks it and may be written back.
+    assert setup(home, claude_bin, claude_running=True, claude_loaded=False)["MCP · Claude desktop"].status == "pending"
+    assert setup(home, claude_bin, claude_running=True, claude_loaded=True)["MCP · Claude desktop"].status == "present"
+
+
+def test_uninstall_while_claude_runs_is_deferred(home, claude_bin):
+    setup(home, claude_bin)
+    steps = setup(home, claude_bin, uninstall=True, claude_running=True, claude_loaded=True)
+    assert steps["MCP · Claude desktop"].status == "pending"
+    assert "llm-hub" in desktop_config(home)["mcpServers"]
+
+
+def test_setup_command_starts_the_finisher_only_when_pending(monkeypatch, home, claude_bin):
+    from llm_hub import cli, desktop
+
+    started, stopped = [], []
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{Path(claude_bin).parent}:/usr/bin:/bin")  # the fake claude needs sh tools
+    monkeypatch.setattr(cli.sys, "platform", "test")  # don't open Finder
+    monkeypatch.setattr(desktop, "start", lambda h, cmd, uninstall: started.append((h, cmd, uninstall)))
+    monkeypatch.setattr(desktop, "stop", lambda h: stopped.append(h))
+    monkeypatch.setattr(desktop, "load_state", lambda h: ("not-loaded", ""))
+
+    monkeypatch.setattr(desktop, "pids", lambda: [4242])
+    cli.main(["setup", "--command", CMD])
+    assert started == [(home, CMD, False)] and "llm-hub" not in desktop_config(home)["mcpServers"]
+
+    monkeypatch.setattr(desktop, "pids", lambda: [])
+    cli.main(["setup", "--command", CMD])
+    assert stopped == [home] and desktop_config(home)["mcpServers"]["llm-hub"]["command"] == CMD
 
 
 def test_missing_apps_are_skipped(tmp_path):

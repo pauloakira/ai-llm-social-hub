@@ -3,8 +3,9 @@
 Targets (each skipped when its app isn't installed):
 - skills: ~/.claude/skills/llm-hub (Claude Code) and ~/.codex/skills/llm-hub (ChatGPT desktop / Codex)
 - Claude Code: user-scope MCP server, via the `claude` CLI
-- Claude desktop: mcpServers entry in claude_desktop_config.json
+- Claude desktop: mcpServers entry in claude_desktop_config.json (deferred to the moment Claude quits while it runs)
 - ChatGPT desktop / Codex: [mcp_servers.llm-hub] in ~/.codex/config.toml
+- Claude Chat tab skill: a zip in ~/.llm-hub/skills to upload in Claude's settings (it can't be installed from here)
 
 Config files are backed up to <file>.bak-llm-hub before the first change.
 """
@@ -22,6 +23,8 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 
+from . import desktop
+
 SERVER = "llm-hub"
 CODEX_BLOCK = re.compile(r"(?ms)^\[mcp_servers\.llm-hub\][^\n]*\n.*?(?=^\[(?!mcp_servers\.llm-hub[.\]])|\Z)")
 
@@ -29,7 +32,7 @@ CODEX_BLOCK = re.compile(r"(?ms)^\[mcp_servers\.llm-hub\][^\n]*\n.*?(?=^\[(?!mcp
 @dataclass
 class Step:
     target: str
-    status: str  # added | updated | present | removed | absent | skipped | blocked | failed
+    status: str  # added | updated | present | removed | absent | skipped | pending | upload | failed
     detail: str = ""
 
 
@@ -79,19 +82,54 @@ def skills(home: Path, dry_run: bool, uninstall: bool) -> list[Step]:
     return steps
 
 
+def _skill_files(flavor: str) -> dict[str, bytes]:
+    src = bundled_skills() / flavor / SERVER
+    return {str(Path(SERVER) / f.relative_to(src)): f.read_bytes() for f in sorted(src.rglob("*")) if f.is_file()}
+
+
+def _zip_files(path: Path) -> dict[str, bytes] | None:
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return {name: zf.read(name) for name in zf.namelist()}
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
 def skill_zips(out_dir: Path) -> list[Path]:
     """Zips for apps that take an upload (ChatGPT web, Claude chat)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     made = []
     for flavor in ("claude", "gpt"):
-        src = bundled_skills() / flavor / SERVER
         path = out_dir / f"llm-hub-{flavor}-skill.zip"
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for f in sorted(src.rglob("*")):
-                if f.is_file():
-                    zf.write(f, Path(SERVER) / f.relative_to(src))
+            for name, data in _skill_files(flavor).items():
+                zf.writestr(name, data)
         made.append(path)
     return made
+
+
+def skill_zip_dir(home: Path) -> Path:
+    return home / ".llm-hub" / "skills"
+
+
+def claude_chat_skill(home: Path, dry_run: bool, uninstall: bool) -> Step:
+    """The Chat tab only takes skills uploaded to the account, so setup builds the zip and says where to upload it."""
+    target = "skill · Claude Chat tab"
+    app_dir = home / "Library" / "Application Support" / "Claude"
+    out = skill_zip_dir(home)
+    path = out / "llm-hub-claude-skill.zip"
+    if not app_dir.is_dir():
+        return Step(target, "skipped", f"{app_dir} not found")
+    if uninstall:
+        existed = out.exists()
+        if existed and not dry_run:
+            shutil.rmtree(out)
+        return Step(target, "removed" if existed else "absent", "also delete it in Claude → Settings → Capabilities → Skills")
+    if _zip_files(path) == _skill_files("claude"):
+        return Step(target, "present", f"{path} (upload it in Claude → Settings → Capabilities → Skills if you haven't)")
+    if not dry_run:
+        skill_zips(out)
+    return Step(target, "upload", f"upload {path} in Claude → Settings → Capabilities → Skills")
 
 
 # ---------- Claude Code ----------
@@ -125,15 +163,16 @@ def claude_code(command: str, claude_bin: str | None, dry_run: bool, uninstall: 
 # ---------- Claude desktop ----------
 
 def claude_desktop_running() -> bool:
-    """Claude desktop keeps its config in memory and writes it back (e.g. on quit), dropping edits made meanwhile."""
-    try:
-        out = subprocess.run(["ps", "-axo", "comm"], capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return any(line.strip().endswith("/Claude.app/Contents/MacOS/Claude") for line in out.splitlines())
+    return bool(desktop.pids())
 
 
-def claude_desktop(home: Path, command: str, dry_run: bool, uninstall: bool, running: bool = False) -> Step:
+def claude_desktop(
+    home: Path, command: str, dry_run: bool, uninstall: bool, running: bool = False, loaded: bool | None = None
+) -> Step:
+    """Write the mcpServers entry, or, while Claude runs, report it as pending: the caller then starts
+    `desktop.finish`, which writes it the moment Claude quits. `loaded` says whether the running Claude has
+    llm-hub connected (read from its log when None); an entry that's in the file but not loaded is pending too,
+    because Claude may write its in-memory copy back over it."""
     target = "MCP · Claude desktop"
     app_dir = home / "Library" / "Application Support" / "Claude"
     path = app_dir / "claude_desktop_config.json"
@@ -148,12 +187,15 @@ def claude_desktop(home: Path, command: str, dry_run: bool, uninstall: bool, run
         del servers[SERVER]
         status = "removed"
     elif servers.get(SERVER) == wanted:
+        if running and not (desktop.load_state(home)[0] == "connected" if loaded is None else loaded):
+            return Step(target, "pending", "in the config but not loaded yet: quit Claude (Cmd+Q) and it reopens with it")
         return Step(target, "present", str(path))
     else:
         status = "updated" if SERVER in servers else "added"
         servers[SERVER] = wanted
     if running:
-        return Step(target, "blocked", "Claude is running and would overwrite this: quit it (Cmd+Q), then re-run in Terminal")
+        what = "removed" if uninstall else "added"
+        return Step(target, "pending", f"{what} when you quit Claude (Cmd+Q); it reopens by itself")
     if not dry_run:
         _backup(path, dry_run)
         path.write_text(json.dumps(config, indent=2) + "\n")
@@ -195,12 +237,14 @@ def run_setup(
     dry_run: bool = False,
     uninstall: bool = False,
     claude_running: bool | None = None,
+    claude_loaded: bool | None = None,
 ) -> list[Step]:
     running = claude_desktop_running() if claude_running is None else claude_running
     steps = skills(home, dry_run, uninstall)
     for target, fn in (
+        ("skill · Claude Chat tab", lambda: claude_chat_skill(home, dry_run, uninstall)),
         ("MCP · Claude Code", lambda: claude_code(command, claude_bin, dry_run, uninstall)),
-        ("MCP · Claude desktop", lambda: claude_desktop(home, command, dry_run, uninstall, running)),
+        ("MCP · Claude desktop", lambda: claude_desktop(home, command, dry_run, uninstall, running, claude_loaded)),
         ("MCP · ChatGPT/Codex", lambda: codex(home, command, dry_run, uninstall)),
     ):
         try:
