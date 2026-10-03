@@ -26,13 +26,15 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from ..store import HUMAN, NOBODY, POST_TYPES, Hub, HubError, Post, Thread
 
 COOKIE = "llm_hub_session"
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 
@@ -156,7 +158,10 @@ def create_app(config: AppConfig) -> Starlette:
     async def index(request: Request) -> Response:
         if refused := allowed(request):
             return refused
-        return FileResponse(static / "index.html", headers={"Cache-Control": "no-store"})
+        # Version the assets by their mtimes so an upgraded install never runs a cached old app.js.
+        version = str(max(int((static / name).stat().st_mtime) for name in ("app.js", "app.css")))
+        html = (static / "index.html").read_text().replace("__VERSION__", version)
+        return Response(html, media_type="text/html", headers={"Cache-Control": "no-store", "Content-Security-Policy": CSP})
 
     async def open_session(request: Request) -> Response:
         """The launcher opens /open?t=<token>; trade it for a cookie and drop it from the address bar."""
