@@ -6,6 +6,7 @@ Targets (each skipped when its app isn't installed):
 - Claude desktop: mcpServers entry in claude_desktop_config.json (deferred to the moment Claude quits while it runs)
 - ChatGPT desktop / Codex: [mcp_servers.llm-hub] in ~/.codex/config.toml
 - Claude Chat tab skill: a zip in ~/.llm-hub/skills to upload in Claude's settings (it can't be installed from here)
+- LLM Hub.app: a launcher in ~/Applications that opens the hub app (`llm-hub app`) in the browser
 
 Config files are backed up to <file>.bak-llm-hub before the first change.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import filecmp
 import json
+import plistlib
 import re
 import shutil
 import subprocess
@@ -229,6 +231,50 @@ def codex(home: Path, command: str, dry_run: bool, uninstall: bool) -> Step:
     return Step(target, status, str(path))
 
 
+# ---------- LLM Hub.app ----------
+
+APP_NAME = "LLM Hub"
+APP_BUNDLE_ID = "io.github.pauloakira.llm-hub"
+
+
+def _launcher_files(command: str) -> dict[str, bytes]:
+    info = {
+        "CFBundleName": APP_NAME,
+        "CFBundleDisplayName": APP_NAME,
+        "CFBundleIdentifier": APP_BUNDLE_ID,
+        "CFBundleExecutable": APP_NAME,
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "LSUIElement": True,  # no Dock icon: it only opens the browser and exits
+        "LSMinimumSystemVersion": "11.0",
+    }
+    script = f'#!/bin/sh\n# Opens the LLM Hub app in the browser, starting its local server if needed.\nexec {json.dumps(command)} app\n'
+    return {"Contents/Info.plist": plistlib.dumps(info), f"Contents/MacOS/{APP_NAME}": script.encode()}
+
+
+def app_launcher(home: Path, command: str, dry_run: bool, uninstall: bool) -> Step:
+    target = "app · LLM Hub.app"
+    if not (home / "Library").is_dir():
+        return Step(target, "skipped", "not a macOS home folder")
+    app = home / "Applications" / f"{APP_NAME}.app"
+    if uninstall:
+        existed = app.exists()
+        if existed and not dry_run:
+            shutil.rmtree(app)
+        return Step(target, "removed" if existed else "absent", str(app))
+    files = _launcher_files(command)
+    if all((app / rel).is_file() and (app / rel).read_bytes() == data for rel, data in files.items()):
+        return Step(target, "present", str(app))
+    status = "updated" if app.exists() else "added"
+    if not dry_run:
+        shutil.rmtree(app, ignore_errors=True)
+        for rel, data in files.items():
+            (app / rel).parent.mkdir(parents=True, exist_ok=True)
+            (app / rel).write_bytes(data)
+        (app / f"Contents/MacOS/{APP_NAME}").chmod(0o755)
+    return Step(target, status, str(app))
+
+
 def run_setup(
     home: Path,
     command: str,
@@ -246,9 +292,23 @@ def run_setup(
         ("MCP · Claude Code", lambda: claude_code(command, claude_bin, dry_run, uninstall)),
         ("MCP · Claude desktop", lambda: claude_desktop(home, command, dry_run, uninstall, running, claude_loaded)),
         ("MCP · ChatGPT/Codex", lambda: codex(home, command, dry_run, uninstall)),
+        ("app · LLM Hub.app", lambda: app_launcher(home, command, dry_run, uninstall)),
     ):
         try:
             steps.append(fn())
         except Exception as exc:  # one broken app config shouldn't stop the others
             steps.append(Step(target, "failed", f"{type(exc).__name__}: {exc}"[:200]))
+    return steps
+
+
+def apply_setup(home: Path, command: str, claude_bin: str | None, *, dry_run: bool = False, uninstall: bool = False,
+                claude_running: bool | None = None) -> list[Step]:
+    """`run_setup` plus its one side effect outside the config files: start the Claude desktop finisher when
+    that step is pending, and stop an older one otherwise (it would undo this run). Used by the CLI and the app."""
+    steps = run_setup(home, command, claude_bin, dry_run=dry_run, uninstall=uninstall, claude_running=claude_running)
+    if not dry_run:
+        if any(step.status == "pending" for step in steps):
+            desktop.start(home, command, uninstall)
+        else:
+            desktop.stop(home)
     return steps

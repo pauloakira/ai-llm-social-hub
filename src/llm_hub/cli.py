@@ -19,6 +19,7 @@ from .store import HUMAN, POST_TYPES, Hub, HubError
 from .view import render_thread, render_thread_list
 
 CURRENT_FILE = Path(os.environ.get("LLM_HUB_HOME", "~/.llm-hub")).expanduser() / "current"
+RECENT_FILE = CURRENT_FILE.with_name("recent")
 
 
 def resolve_root(explicit: str | None = None) -> Path:
@@ -62,11 +63,25 @@ def cmd_init(args: argparse.Namespace) -> None:
         cmd_use(argparse.Namespace(repo=str(hub.root)))
 
 
-def cmd_use(args: argparse.Namespace) -> None:
-    root = Hub(_hub_dir(Path(args.repo))).root
+def use_hub(path: Path) -> Path:
+    """Make the hub at `path` (a repo or its llm-hub/ directory) the current one, and remember it as recent."""
+    root = Hub(_hub_dir(path)).root
     CURRENT_FILE.parent.mkdir(parents=True, exist_ok=True)
     CURRENT_FILE.write_text(str(root))
-    print(f"Current hub: {root}")
+    recent = [str(root), *(p for p in recent_hubs() if p != str(root))][:10]
+    RECENT_FILE.write_text("\n".join(recent) + "\n")
+    return root
+
+
+def recent_hubs() -> list[str]:
+    """Hubs picked with `use` or `init`, newest first, that still exist."""
+    if not RECENT_FILE.exists():
+        return []
+    return [p for p in RECENT_FILE.read_text().splitlines() if p and (Path(p) / "hub.yaml").exists()]
+
+
+def cmd_use(args: argparse.Namespace) -> None:
+    print(f"Current hub: {use_hub(Path(args.repo))}")
 
 
 def cmd_where(args: argparse.Namespace) -> None:
@@ -135,7 +150,7 @@ def _table(rows: list[tuple[str, str, str]]):
 
 def cmd_setup(args: argparse.Namespace) -> None:
     from . import desktop
-    from .setup import claude_desktop, run_setup, skill_zip_dir, skill_zips
+    from .setup import apply_setup, claude_desktop, skill_zip_dir, skill_zips
 
     console = Console()
     if args.zip:
@@ -152,13 +167,8 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if args.finish_claude_desktop:
         apply = lambda: claude_desktop(home, command, dry_run=False, uninstall=args.uninstall).status  # noqa: E731
         sys.exit(0 if desktop.finish(home, apply, args.uninstall) else 1)
-    steps = run_setup(home, command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall)
+    steps = apply_setup(home, command, shutil.which("claude"), dry_run=args.dry_run, uninstall=args.uninstall)
     by_status = {step.status for step in steps}
-    if not args.dry_run:
-        if "pending" in by_status:
-            desktop.start(home, command, args.uninstall)
-        else:
-            desktop.stop(home)  # an older finisher would undo this run
     verb = "Would change" if args.dry_run else ("Uninstalled" if args.uninstall else "Set up")
     console.print(f"[bold]{verb}[/] llm-hub ([grey62]{command}[/])")
     console.print(_table([(s.target, s.status, s.detail) for s in steps]))
@@ -200,6 +210,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         console.print("\nEverything checks out.")
     if any(c.status == "fail" for c in checks):
         sys.exit(1)
+
+
+def cmd_app(args: argparse.Namespace) -> None:
+    from .web import launch
+
+    command = args.command or _llm_hub_command()
+    if args.serve:
+        launch.serve(args.port, command, shutil.which("claude"), idle_timeout=None if args.stay else launch.IDLE_TIMEOUT)
+        return
+    if not command:
+        raise HubError("No permanent llm-hub install found. Install it first: "
+                       "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub")
+    try:
+        url = launch.launch(command, args.port, open_browser=not args.no_open)
+    except RuntimeError as exc:
+        raise HubError(str(exc)) from exc
+    print(url if args.no_open else f"LLM Hub is open in your browser. If it didn't open, go to:\n{url}")
 
 
 def cmd_ls(args: argparse.Namespace) -> None:
@@ -312,6 +339,14 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("doctor", help="check that every app can reach the hub, and say how to fix what can't")
     p.add_argument("--command", help="path the apps launch (default: llm-hub on PATH)")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("app", help="open the LLM Hub app in your browser")
+    p.add_argument("--port", type=int, default=8770)
+    p.add_argument("--no-open", action="store_true", help="print the link instead of opening the browser")
+    p.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)  # run the server in this process
+    p.add_argument("--stay", action="store_true", help=argparse.SUPPRESS)  # with --serve: never stop when idle
+    p.add_argument("--command", help=argparse.SUPPRESS)  # the llm-hub to run the server with (development)
+    p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("ls", help="list threads")
     p.add_argument("--status", default="open", choices=["open", "resolved", "all"])
