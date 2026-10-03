@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import subprocess
@@ -154,13 +155,13 @@ def create_app(config: AppConfig) -> Starlette:
     # ----- pages -----
 
     static = Path(str(files("llm_hub.web").joinpath("static")))
+    # Version the assets by content (wheels give every file the same mtime) so an upgrade never runs a cached app.js.
+    asset_version = hashlib.sha256(b"".join((static / n).read_bytes() for n in ("app.js", "app.css"))).hexdigest()[:12]
 
     async def index(request: Request) -> Response:
         if refused := allowed(request):
             return refused
-        # Version the assets by their mtimes so an upgraded install never runs a cached old app.js.
-        version = str(max(int((static / name).stat().st_mtime) for name in ("app.js", "app.css")))
-        html = (static / "index.html").read_text().replace("__VERSION__", version)
+        html = (static / "index.html").read_text().replace("__VERSION__", asset_version)
         return Response(html, media_type="text/html", headers={"Cache-Control": "no-store", "Content-Security-Policy": CSP})
 
     async def open_session(request: Request) -> Response:

@@ -215,7 +215,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 def cmd_app(args: argparse.Namespace) -> None:
     from .web import launch
 
-    command = _llm_hub_command()
+    command = args.command or _llm_hub_command()
     if args.serve:
         launch.serve(args.port, command, shutil.which("claude"), idle_timeout=None if args.stay else launch.IDLE_TIMEOUT)
         return
@@ -226,7 +226,7 @@ def cmd_app(args: argparse.Namespace) -> None:
         url = launch.launch(command, args.port, open_browser=not args.no_open)
     except RuntimeError as exc:
         raise HubError(str(exc)) from exc
-    print(f"LLM Hub is open in your browser. If it didn't open, go to:\n{url}")
+    print(url if args.no_open else f"LLM Hub is open in your browser. If it didn't open, go to:\n{url}")
 
 
 def cmd_ls(args: argparse.Namespace) -> None:
@@ -345,6 +345,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-open", action="store_true", help="print the link instead of opening the browser")
     p.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)  # run the server in this process
     p.add_argument("--stay", action="store_true", help=argparse.SUPPRESS)  # with --serve: never stop when idle
+    p.add_argument("--command", help=argparse.SUPPRESS)  # the llm-hub to run the server with (development)
     p.set_defaults(func=cmd_app)
 
     p = sub.add_parser("ls", help="list threads")

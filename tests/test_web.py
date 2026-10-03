@@ -59,6 +59,13 @@ def test_rejects_other_hosts_and_cross_site_origins(client):
 
 # ---------- threads ----------
 
+def test_index_is_versioned_and_locked_down(client):
+    resp = client.get("/")
+    assert "frame-ancestors 'none'" in resp.headers["content-security-policy"]
+    assert resp.headers["cache-control"] == "no-store"
+    assert "app.js?v=" in resp.text and "__VERSION__" not in resp.text
+
+
 def test_state_reports_the_hub(client, hub):
     state = client.get("/api/state").json()
     assert state["hub"]["root"] == str(hub.root)
