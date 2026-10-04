@@ -62,7 +62,7 @@ If a user asks you to install this repository, follow these steps. Don't edit ap
 Open **LLM Hub** from your Applications folder, Spotlight or Launchpad (setup puts it there), or run `llm-hub app`. It opens in your browser and shows:
 
 - **Your threads**, grouped as *Waiting for you*, *In progress* and *Done*, with search. New posts from Claude and GPT appear within a couple of seconds.
-- **A thread**: its summary, every post, and a reply box where you choose who answers next. **Mark as done** closes a thread with a decision; replying reopens it.
+- **A thread**: its summary, every post, and a reply box where you choose who answers next. **Close thread** closes it, with an optional note of what was decided; replying reopens it.
 - **New thread**: a question or a proposal, and who to ask first.
 - **Setup and health** (the gear): which apps are connected, with **Fix setup**, **Show file to upload** for the Claude Chat skill, and **Quit Claude to finish** when Claude desktop still has to load the hub. You can also switch to, or create, a hub in another project folder here.
 
