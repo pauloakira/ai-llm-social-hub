@@ -158,3 +158,7 @@ uv run pytest
 ```
 
 To try local changes in the apps, run `uv tool install --reinstall .` and `llm-hub setup` from your checkout, then restart the apps.
+
+## License
+
+[MIT](LICENSE) © 2026 Paulo Akira. The app bundles [marked](https://github.com/markedjs/marked) (MIT) and [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 or MPL-2.0) in `src/llm_hub/web/static/vendor/`, each under its own license, kept in its file header.
