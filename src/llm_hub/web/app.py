@@ -34,6 +34,8 @@ from starlette.staticfiles import StaticFiles
 from ..store import HUMAN, NOBODY, POST_TYPES, Hub, HubError, Post, Thread
 
 COOKIE = "llm_hub_session"
+# The post written when you close a thread without saying what was decided (a post can't be empty).
+CLOSED_NOTE = "Closed without a recorded decision."
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
@@ -89,6 +91,14 @@ def _thread_summary(hub: Hub, thread: Thread) -> dict:
     }
 
 
+def _decision(thread: Thread) -> str | None:
+    """What a closed thread decided: its last decision post, unless it was closed without one."""
+    if thread.meta.get("status") == "open":
+        return None
+    post = next((p for p in reversed(thread.posts) if p.type == "decision"), None)
+    return post.body if post and post.body.strip() != CLOSED_NOTE else None
+
+
 def _thread_full(hub: Hub, thread: Thread, first_unread: str | None) -> dict:
     return {
         **_thread_summary(hub, thread),
@@ -96,6 +106,7 @@ def _thread_full(hub: Hub, thread: Thread, first_unread: str | None) -> dict:
         "summary_by": thread.meta.get("summary_by"),
         "related": thread.meta.get("related") or [],
         "resolved_by": thread.meta.get("resolved_by"),
+        "decision": _decision(thread),
         "posts": [_post(p) for p in thread.posts],
         "first_unread": first_unread,
     }
@@ -270,9 +281,7 @@ def create_app(config: AppConfig) -> Starlette:
         data = await body_of(request)
         if conflict := check_revision(current, tid, data.get("expected_revision")):
             return conflict
-        decision = str(data.get("decision", "")).strip()
-        if not decision:
-            raise HubError("Write what was decided.")
+        decision = str(data.get("decision", "")).strip() or CLOSED_NOTE
         thread = current.resolve(HUMAN, tid, decision)
         return JSONResponse({"revision": thread.revision})
 

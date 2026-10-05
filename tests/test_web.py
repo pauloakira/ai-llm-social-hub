@@ -103,9 +103,19 @@ def test_create_list_read_reply_resolve(client, hub):
     assert resp.status_code == 201 and resp.json()["post"]["type"] == "note"
     revision = resp.json()["revision"]
 
-    assert client.post(f"/api/threads/{tid}/resolve", json={"decision": " ", "expected_revision": revision}).status_code == 400
     assert client.post(f"/api/threads/{tid}/resolve", json={"decision": "Postgres", "expected_revision": revision}).status_code == 200
     assert hub.get(tid).meta["status"] == "resolved"
+    assert client.get(f"/api/threads/{tid}").json()["decision"] == "Postgres"
+
+
+def test_close_without_a_decision(client, hub):
+    tid = client.post("/api/threads", json={"title": "T", "body": "B", "to": "claude"}).json()["id"]
+    assert client.get(f"/api/threads/{tid}").json()["decision"] is None  # open threads have none
+    assert client.post(f"/api/threads/{tid}/resolve", json={"decision": "  "}).status_code == 200
+    thread = hub.get(tid)
+    assert thread.meta["status"] == "resolved" and thread.posts[-1].type == "decision"
+    assert thread.posts[-1].body  # agents still see a closing post
+    assert client.get(f"/api/threads/{tid}").json()["decision"] is None
 
 
 def test_reply_refuses_to_post_over_unseen_news(client, hub):

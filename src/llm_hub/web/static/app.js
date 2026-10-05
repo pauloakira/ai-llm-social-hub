@@ -55,7 +55,7 @@ function nameOf(agent) {
 }
 
 function waitingLabel(thread) {
-  if (thread.status === "resolved") return "Done";
+  if (thread.status === "resolved") return "Closed";
   if (thread.awaiting === "human") return "Waiting for you";
   if (thread.awaiting === "none" || !thread.awaiting) return "Nothing pending";
   return `Waiting for ${nameOf(thread.awaiting)}`;
@@ -291,7 +291,7 @@ function renderList() {
   const waiting = state.threads.filter((t) => t.status === "open" && t.awaiting === "human");
   const going = state.threads.filter((t) => t.status === "open" && t.awaiting !== "human");
   const done = state.threads.filter((t) => t.status !== "open");
-  const groups = [["Waiting for you", waiting], ["In progress", going], ["Done", done]];
+  const groups = [["Waiting for you", waiting], ["In progress", going], ["Closed", done]];
   const children = [];
   for (const [label, items] of groups) {
     if (!items.length) continue;
@@ -305,7 +305,7 @@ function renderList() {
 }
 
 function listItem(thread) {
-  const meta = thread.status !== "open" ? `Done · ${ago(thread.updated)}`
+  const meta = thread.status !== "open" ? `Closed · ${ago(thread.updated)}`
     : `${waitingLabel(thread)} · ${ago(thread.updated)}`;
   const unread = thread.unread > 0 ? `${thread.unread} new · ` : "";
   return h("button", {
@@ -369,7 +369,7 @@ function renderThread({ keepScroll = false, keepComposer = false } = {}) {
       h("button", { class: "btn ghost small back-to-list", "aria-label": "All threads", onclick: () => document.getElementById("body").classList.add("list-open") }, icon("back")),
       h("h1", {}, thread.title),
       thread.status === "open"
-        ? h("button", { class: "btn small", onclick: () => openResolve(thread) }, icon("check"), "Mark as done")
+        ? h("button", { class: "btn small", onclick: () => openResolve(thread) }, icon("check"), "Close thread")
         : null),
     h("div", { class: "chips" },
       h("span", { class: `chip ${statusClass}` }, waitingLabel(thread)),
@@ -379,10 +379,10 @@ function renderThread({ keepScroll = false, keepComposer = false } = {}) {
 
   const body = [];
   if (thread.status !== "open") {
-    const decision = [...thread.posts].reverse().find((p) => p.type === "decision");
+    const by = thread.resolved_by ? ` by ${nameOf(thread.resolved_by)}` : "";
     body.push(h("div", { class: "banner ok" }, icon("ok"),
-      h("div", {}, h("b", {}, `Done${thread.resolved_by ? ` · decided by ${nameOf(thread.resolved_by)}` : ""}`),
-        decision ? markdown(decision.body) : null)));
+      h("div", {}, h("b", {}, thread.decision ? `Closed${by} · decision` : `Closed${by}`),
+        thread.decision ? markdown(thread.decision) : h("div", { class: "md" }, "Reply below to reopen it."))));
   }
   if (thread.summary) {
     body.push(h("section", { class: "summary" }, h("h2", {}, `Summary${thread.summary_by ? ` · by ${nameOf(thread.summary_by)}` : ""}`), markdown(thread.summary)));
@@ -576,22 +576,22 @@ function openNewThread() {
 function openResolve(thread) {
   const decision = h("textarea", { rows: 4, placeholder: "Postgres, managed, with nightly backups." });
   const error = h("div", { class: "error-text", role: "alert" });
-  dialog("Mark as done", "Write what was decided, so anyone reading only this post knows what to do. You can reopen the thread later by replying.",
-    h("div", {}, h("label", { class: "field" }, h("span", {}, "What was decided?"), decision), error),
+  dialog("Close thread", "Claude and GPT stop working on it. You can reopen it later by replying.",
+    h("div", {}, h("label", { class: "field" }, h("span", {}, "What was decided? (optional)"), decision),
+      h("p", { class: "small muted" }, "Writing it down helps anyone who reads this thread later."), error),
     (close) => [
       h("button", { class: "btn", onclick: close }, "Cancel"),
       h("button", { class: "btn primary", onclick: (e) => busy(e.currentTarget, async () => {
-        if (!decision.value.trim()) { error.textContent = "Write what was decided."; return; }
         try {
           await api(`/api/threads/${thread.id}/resolve`, { method: "POST", body: { decision: decision.value, expected_revision: thread.revision } });
           close();
-          toast("Marked as done");
+          toast("Thread closed");
           await Promise.all([openThread(thread.id), loadThreads()]);
         } catch (err) {
           if (err.status === 409) { close(); toast(err.message); await openThread(thread.id); return; }
           error.textContent = err.message;
         }
-      }) }, "Mark as done"),
+      }) }, "Close thread"),
     ]);
 }
 
