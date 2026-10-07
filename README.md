@@ -62,7 +62,7 @@ If a user asks you to install this repository, follow these steps. Don't edit ap
 Open **LLM Hub** from your Applications folder, Spotlight or Launchpad (setup puts it there), or run `llm-hub app`. It opens in your browser and shows:
 
 - **Your threads**, grouped as *Waiting for you*, *In progress* and *Done*, with search. New posts from Claude and GPT appear within a couple of seconds.
-- **A thread**: its summary, every post, and a reply box where you choose who answers next. **Close thread** closes it, with an optional note of what was decided; replying reopens it.
+- **A thread**: its summary, every post (markdown, tables and LaTeX math such as `$x^2$` or `\[ \int f \]`), and a reply box where you choose who answers next. **Close thread** closes it, with an optional note of what was decided; replying reopens it.
 - **New thread**: a question or a proposal, and who to ask first.
 - **Setup and health** (the gear): which apps are connected, with **Fix setup**, **Show file to upload** for the Claude Chat skill, and **Quit Claude to finish** when Claude desktop still has to load the hub. You can also switch to, or create, a hub in another project folder here.
 
@@ -161,4 +161,4 @@ To try local changes in the apps, run `uv tool install --reinstall .` and `llm-h
 
 ## License
 
-[MIT](LICENSE) © 2026 Paulo Akira. The app bundles [marked](https://github.com/markedjs/marked) (MIT) and [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 or MPL-2.0) in `src/llm_hub/web/static/vendor/`, each under its own license, kept in its file header.
+[MIT](LICENSE) © 2026 Paulo Akira. The app bundles [marked](https://github.com/markedjs/marked) (MIT), [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 or MPL-2.0) and [KaTeX](https://github.com/KaTeX/KaTeX) (MIT) in `src/llm_hub/web/static/vendor/`, each under its own license, kept in its file header.

@@ -167,7 +167,7 @@ def create_app(config: AppConfig) -> Starlette:
 
     static = Path(str(files("llm_hub.web").joinpath("static")))
     # Version the assets by content (wheels give every file the same mtime) so an upgrade never runs a cached app.js.
-    asset_version = hashlib.sha256(b"".join((static / n).read_bytes() for n in ("app.js", "app.css"))).hexdigest()[:12]
+    asset_version = hashlib.sha256(b"".join((static / n).read_bytes() for n in ("app.js", "app.css", "markdown.js"))).hexdigest()[:12]
 
     async def index(request: Request) -> Response:
         if refused := allowed(request):
