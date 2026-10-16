@@ -196,6 +196,8 @@ def test_launcher_app_bundle(tmp_path):
     assert '"/x/llm-hub" app' in script.read_text() and script.stat().st_mode & 0o111
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     assert info["CFBundleExecutable"] == "LLM Hub" and info["LSUIElement"] is True
+    assert info["CFBundleIconFile"] == "AppIcon"
+    assert (app / "Contents" / "Resources" / "AppIcon.icns").read_bytes()[:4] == b"icns"
     assert app_launcher(home, "/x/llm-hub", dry_run=False, uninstall=False).status == "present"
     assert app_launcher(home, "/y/llm-hub", dry_run=False, uninstall=False).status == "updated"
     assert app_launcher(home, "/y/llm-hub", dry_run=False, uninstall=True).status == "removed"

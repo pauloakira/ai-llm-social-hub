@@ -245,11 +245,15 @@ def _launcher_files(command: str) -> dict[str, bytes]:
         "CFBundleExecutable": APP_NAME,
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": "1.0",
+        "CFBundleIconFile": "AppIcon",
         "LSUIElement": True,  # no Dock icon: it only opens the browser and exits
         "LSMinimumSystemVersion": "11.0",
     }
     script = f'#!/bin/sh\n# Opens the LLM Hub app in the browser, starting its local server if needed.\nexec {json.dumps(command)} app\n'
-    return {"Contents/Info.plist": plistlib.dumps(info), f"Contents/MacOS/{APP_NAME}": script.encode()}
+    # The icon is drawn from assets/AppIcon.svg (sips to PNG, then iconutil); rebuild the .icns if the SVG changes.
+    icon = Path(str(files("llm_hub").joinpath("assets", "AppIcon.icns"))).read_bytes()
+    return {"Contents/Info.plist": plistlib.dumps(info), f"Contents/MacOS/{APP_NAME}": script.encode(),
+            "Contents/Resources/AppIcon.icns": icon}
 
 
 def app_launcher(home: Path, command: str, dry_run: bool, uninstall: bool) -> Step:
