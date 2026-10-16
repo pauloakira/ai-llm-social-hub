@@ -178,6 +178,10 @@ textarea { resize: vertical; min-height: 64px; line-height: 1.5; }
 .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
 .md h1, .md h2, .md h3 { font-size: 15px; margin: 12px 0 4px; }
 .md ul, .md ol { padding-left: 22px; margin: 6px 0; }
+.md math { font-size: 1.08em; }
+.md .math-display { display: block; overflow-x: auto; overflow-y: hidden; margin: 8px 0; padding: 2px 0; }
+.md .math-display math { display: block math; }
+.md code.math-source { color: var(--muted); }
 
 .composer { border-top: 1px solid var(--line); padding: 12px 22px 14px; background: var(--bg); }
 .composer textarea { min-height: 72px; max-height: 40vh; }

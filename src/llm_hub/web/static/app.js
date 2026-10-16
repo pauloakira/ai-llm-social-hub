@@ -39,10 +39,9 @@ function h(tag, attrs = {}, ...children) {
 const icon = (name) => h("span", { class: "icon", html: ICONS[name], "aria-hidden": "true" });
 
 function markdown(text) {
-  const html = window.marked ? window.marked.parse(text || "", { breaks: true, gfm: true }) : null;
   const div = h("div", { class: "md" });
-  if (html !== null && window.DOMPurify) {
-    div.innerHTML = window.DOMPurify.sanitize(html);
+  if (window.LLMHubMarkdown && window.marked && window.DOMPurify) {
+    div.innerHTML = window.LLMHubMarkdown.render(text || ""); // sanitized; formulas rendered by KaTeX (markdown.js)
     div.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; });
   } else {
     div.textContent = text || "";
