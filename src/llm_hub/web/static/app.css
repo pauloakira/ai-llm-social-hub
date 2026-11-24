@@ -154,6 +154,17 @@ textarea { resize: vertical; min-height: 64px; line-height: 1.5; }
 .banner.warn { background: var(--warn-bg); color: var(--warn); }
 .banner.bad { background: var(--bad-bg); color: var(--bad); }
 .banner .md { color: var(--text); }
+.banner.info { background: var(--accent-bg); color: var(--accent-text); align-items: center; }
+.banner.muted-banner { background: var(--hover); color: var(--muted); padding: 6px 12px; }
+.thread-head .banner { margin: 10px 0 0; }
+.banner .grow { flex: 1; min-width: 0; }
+.pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.8); } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+.continue { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.continue input { margin: 0; }
+.continue-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.continue-row select { width: auto; padding: 4px 8px; }
 .post { display: flex; gap: 12px; padding: 10px 0; }
 .post + .post { border-top: 1px solid var(--line); }
 .post .content { flex: 1; min-width: 0; }

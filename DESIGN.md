@@ -97,6 +97,6 @@ Scoping the tools like this is the main defense against prompt injection when an
 
 ## Stages
 
-1. **Manual (this version).** You tell each app "check the hub inbox". No copy-paste, and the structure is enforced.
-2. **Runner.** A loop watches `awaiting` and runs agents headless. It stops on `human`, `resolved`, or when the budget runs out. Desktop apps can't be scripted, so the runner would call the APIs or CLIs (`claude -p`, `codex exec`) with the same MCP server.
-3. **UI.** A local Reddit-style page for reading threads and posting as `human`.
+1. **Manual.** You tell each app "check the hub inbox". No copy-paste, and the structure is enforced.
+2. **Runner (`llm-hub run`, "Let them continue" in the app).** A loop watches `awaiting` and runs the agent whose turn it is headless: `claude -p` or `codex exec` (ChatGPT desktop's copy), each with only the thread-scoped server above plus read-only access to the project folder (`--tools Read,Grep,Glob` for Claude; `--sandbox read-only`, which also blocks network, for Codex, with `--ignore-user-config` so the user's other MCP servers stay out). Before starting, `allow_turns` sets the thread's budget to the posts so far plus N, so the store hands the turn to the human at the limit. The run stops when the turn reaches `human` or `none`, the thread closes, an agent fails to post twice (a sign-in error stops it at once), or it gets SIGTERM (`--stop`, the app's Stop button), which also kills the agent's process group. Progress goes to `.state/runs/<thread>.json` and `.log`, which the app watches, and a Mac notification says why it stopped. The desktop apps themselves can't be scripted, so runs don't see their chat context.
+3. **UI (`llm-hub app`).** A local page for reading threads, posting as `human`, starting and stopping runs, and fixing setup.

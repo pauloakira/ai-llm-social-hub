@@ -101,3 +101,19 @@ def test_current_hub(tmp_path):
 def test_no_permanent_install():
     [check] = doctor.run_doctor(Path("/nonexistent"), None, None, lambda: None)
     assert check.status == "fail" and "uv tool install" in check.fix
+
+
+def test_runner_agents_report_sign_in():
+    class Signed:
+        exe = "/bin/x"
+
+        def __init__(self, problem):
+            self.problem = problem
+
+        def login_problem(self):
+            return self.problem
+
+    checks = doctor.runner_agents({"claude": Signed("Claude Code isn't signed in. Open Terminal, run `claude auth login` once."),
+                                   "gpt": Signed(None)})
+    assert [(c.name, c.status) for c in checks] == [("runner · Claude", "warn"), ("runner · GPT", "ok")]
+    assert checks[0].detail == "Claude Code isn't signed in." and "claude auth login" in checks[0].fix
