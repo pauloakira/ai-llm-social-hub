@@ -31,6 +31,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from .. import runner
 from ..store import HUMAN, NOBODY, POST_TYPES, Hub, HubError, Post, Thread
 
 COOKIE = "llm_hub_session"
@@ -57,6 +58,8 @@ class AppConfig:
     quit_claude: Callable[[], None] | None = None
     health: Callable[[], list[dict]] | None = None
     setup: Callable[[], list[dict]] | None = None
+    agents: Callable[[], dict] | None = None  # the runner's agents (checked before a run starts)
+    start_run: Callable[[Path, str, int], None] | None = None  # start `llm-hub run` in the background
     poll_interval: float = 1.0
     max_events: int | None = None  # end the event stream after this many changes (tests)
     idle_timeout: float | None = None  # seconds without requests or open pages before `on_idle` runs
@@ -88,7 +91,16 @@ def _thread_summary(hub: Hub, thread: Thread) -> dict:
         "posts": len(thread.posts),
         "unread": len(hub.unread(HUMAN, thread)),
         "last": {"author": last.author, "ts": last.ts, "preview": " ".join(last.body.split())[:140]} if last else None,
+        "run": _run(hub, thread.id),
     }
+
+
+def _run(hub: Hub, tid: str) -> dict | None:
+    state = runner.load_state(hub.root, tid)
+    if not state:
+        return None
+    return {"status": state.status, "agent": state.agent, "posts": state.posts, "max_turns": state.max_turns,
+            "reason": state.reason, "updated": state.updated}
 
 
 def _decision(thread: Thread) -> str | None:
@@ -285,13 +297,36 @@ def create_app(config: AppConfig) -> Starlette:
         thread = current.resolve(HUMAN, tid, decision)
         return JSONResponse({"revision": thread.revision})
 
+    # ----- the runner -----
+
+    async def start_run(request: Request) -> Response:
+        if not (config.start_run and config.agents):
+            return _error("Letting the agents continue isn't available here.", 501)
+        current = hub()
+        tid = current.get(request.path_params["tid"]).id
+        data = await body_of(request)
+        try:
+            max_turns = int(data.get("max_turns") or runner.DEFAULT_TURNS)
+        except (TypeError, ValueError):
+            raise HubError("max_turns must be a number.")
+        if not 1 <= max_turns <= 100:
+            raise HubError("Choose between 1 and 100 turns.")
+        await run_in_threadpool(runner.preflight, current.root, tid, config.agents())
+        await run_in_threadpool(config.start_run, current.root, tid, max_turns)
+        return JSONResponse({"started": tid, "max_turns": max_turns}, status_code=202)
+
+    async def stop_run(request: Request) -> Response:
+        current = hub()
+        tid = current.get(request.path_params["tid"]).id
+        return JSONResponse({"stopping": runner.stop(current.root, tid)})
+
     # ----- live updates -----
 
     def signature() -> tuple:
         try:
             root = config.resolve()
-            threads = Path(root) / "threads"
-            return (str(root), tuple(sorted((p.name, p.stat().st_mtime_ns) for p in threads.glob("T-*.md"))))
+            files = [*(Path(root) / "threads").glob("T-*.md"), *runner.runs_dir(Path(root)).glob("T-*.json")]
+            return (str(root), tuple(sorted((p.name, p.stat().st_mtime_ns) for p in files)))
         except (HubError, OSError):
             return ("", ())
 
@@ -307,7 +342,7 @@ def create_app(config: AppConfig) -> Starlette:
                     current = await run_in_threadpool(signature)
                     if current != previous:
                         old = dict(previous[1])
-                        changed = [name[:6] for name, mtime in current[1] if old.get(name) != mtime]
+                        changed = sorted({name[:6] for name, mtime in current[1] if old.get(name) != mtime})
                         hub_changed = current[0] != previous[0]
                         previous = current
                         yield {"event": "change", "data": _json({"threads": changed, "hub": hub_changed})}
@@ -378,6 +413,8 @@ def create_app(config: AppConfig) -> Starlette:
         Route("/api/threads/{tid}", api(get_thread)),
         Route("/api/threads/{tid}/posts", api(reply), methods=["POST"]),
         Route("/api/threads/{tid}/resolve", api(resolve), methods=["POST"]),
+        Route("/api/threads/{tid}/run", api(start_run), methods=["POST"]),
+        Route("/api/threads/{tid}/run/stop", api(stop_run), methods=["POST"]),
         Route("/api/events", api(events)),
         Route("/api/health", api(health)),
         Route("/api/setup", api(run_setup), methods=["POST"]),

@@ -16,6 +16,7 @@ const ICONS = {
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m15 18-6-6 6-6"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M7 5v14l11-7z"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>',
 };
 
@@ -305,6 +306,7 @@ function renderList() {
 
 function listItem(thread) {
   const meta = thread.status !== "open" ? `Closed · ${ago(thread.updated)}`
+    : isRunning(thread) ? `Running · ${thread.run.agent ? `${nameOf(thread.run.agent)} is writing` : "between turns"}`
     : `${waitingLabel(thread)} · ${ago(thread.updated)}`;
   const unread = thread.unread > 0 ? `${thread.unread} new · ` : "";
   return h("button", {
@@ -314,6 +316,80 @@ function listItem(thread) {
   },
     h("div", { class: "title" }, h("span", {}, thread.title), thread.unread > 0 ? h("i", { class: "dot", "aria-label": "unread" }) : null),
     h("div", { class: "meta" }, unread + meta));
+}
+
+// ---------- letting the agents continue ----------
+
+const RUN_LIMITS = [5, 10, 20, 40];
+
+function pref(key, fallback) {
+  try { const v = localStorage.getItem(`llmhub.${key}`); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
+}
+
+function setPref(key, value) {
+  try { localStorage.setItem(`llmhub.${key}`, JSON.stringify(value)); } catch { /* private mode: just don't remember */ }
+}
+
+const isRunning = (thread) => !!(thread.run && thread.run.status === "running");
+const agentsTurn = (thread) => thread.status === "open" && state.agents.includes(thread.awaiting);
+
+async function startRun(tid, maxTurns) {
+  try {
+    await api(`/api/threads/${tid}/run`, { method: "POST", body: { max_turns: maxTurns } });
+    toast(`Claude and GPT are taking turns, up to ${maxTurns} posts. You'll get a notification when it needs you.`);
+    if (state.current && state.current.id === tid) await openThread(tid);
+    await loadThreads();
+    return true;
+  } catch (err) {
+    toast(err.message, "bad");
+    return false;
+  }
+}
+
+async function stopRun(tid) {
+  try {
+    await api(`/api/threads/${tid}/run/stop`, { method: "POST" });
+    toast("Stopping after the current step…");
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+function limitPicker(value, onChange) {
+  return h("select", { "aria-label": "Most posts", onchange: (e) => onChange(Number(e.target.value)) },
+    RUN_LIMITS.map((n) => h("option", { value: n, selected: n === value }, `up to ${n} posts`)));
+}
+
+function openRun(thread) {
+  let limit = pref("runLimit", 20);
+  dialog("Let them continue", "Claude and GPT take turns on their own until one of them hands the thread to you or closes it, or they reach the limit. They can read this project's files but can't change anything. You'll get a notification when it's your turn.",
+    h("div", {}, h("label", { class: "field" }, h("span", {}, "Stop after"), limitPicker(limit, (n) => { limit = n; }))),
+    (close) => [
+      h("button", { class: "btn", onclick: close }, "Cancel"),
+      h("button", { class: "btn primary", onclick: (e) => busy(e.currentTarget, async () => {
+        setPref("runLimit", limit);
+        if (await startRun(thread.id, limit)) close();
+      }) }, "Start"),
+    ]);
+}
+
+function runBanner(thread) {
+  const run = thread.run;
+  if (!run) return null;
+  if (run.status === "running") {
+    const now = run.agent ? `${nameOf(run.agent)} is writing…` : "Starting the next turn…";
+    return h("div", { class: "banner info run" }, h("span", { class: "pulse", "aria-hidden": "true" }),
+      h("div", { class: "grow" }, h("b", {}, "Claude and GPT are working on this"), h("div", {}, `${now} ${run.posts} of ${run.max_turns} posts so far.`)),
+      h("button", { class: "btn small", onclick: (e) => busy(e.currentTarget, () => stopRun(thread.id)) }, "Stop"));
+  }
+  const recent = Date.now() / 1000 - run.updated < 30 * 60;
+  if (run.status === "failed" && recent) {
+    return h("div", { class: "banner bad" }, icon("warn"), h("div", {}, h("b", {}, "The run stopped"), h("div", {}, run.reason)));
+  }
+  if (recent && run.reason) {
+    return h("div", { class: "banner muted-banner" }, h("div", {}, `Last run: ${run.reason} (${run.posts} posts)`));
+  }
+  return null;
 }
 
 // ---------- one thread ----------
@@ -367,6 +443,9 @@ function renderThread({ keepScroll = false, keepComposer = false } = {}) {
     h("div", { class: "row" },
       h("button", { class: "btn ghost small back-to-list", "aria-label": "All threads", onclick: () => document.getElementById("body").classList.add("list-open") }, icon("back")),
       h("h1", {}, thread.title),
+      agentsTurn(thread) && !isRunning(thread)
+        ? h("button", { class: "btn small", onclick: () => openRun(thread) }, icon("play"), "Let them continue")
+        : null,
       thread.status === "open"
         ? h("button", { class: "btn small", onclick: () => openResolve(thread) }, icon("check"), "Close thread")
         : null),
@@ -374,7 +453,8 @@ function renderThread({ keepScroll = false, keepComposer = false } = {}) {
       h("span", { class: `chip ${statusClass}` }, waitingLabel(thread)),
       thread.status === "open" ? h("span", { class: "chip", title: "Agent posts since you last posted. At the limit, the turn comes to you." }, `${thread.turns} of ${thread.max_turns} turns used`) : null,
       thread.tags.length ? h("span", { class: "chip" }, thread.tags.join(" · ")) : null,
-      h("span", { class: "chip" }, thread.id)));
+      h("span", { class: "chip" }, thread.id)),
+    runBanner(thread));
 
   const body = [];
   if (thread.status !== "open") {
@@ -391,8 +471,10 @@ function renderThread({ keepScroll = false, keepComposer = false } = {}) {
     body.push(renderPost(post, thread));
   }
   if (thread.status === "open" && thread.awaiting !== "human" && thread.awaiting !== "none") {
-    body.push(h("div", { class: "next-up" }, h("div", { class: `avatar ${thread.awaiting}` }, nameOf(thread.awaiting).charAt(0)),
-      `${nameOf(thread.awaiting)}'s turn. Tell ${nameOf(thread.awaiting)} to “check the hub”, or reply below to add something first.`));
+    const who = nameOf(thread.awaiting);
+    body.push(h("div", { class: "next-up" }, h("div", { class: `avatar ${thread.awaiting}` }, who.charAt(0)),
+      isRunning(thread) ? `${who}'s turn. It's writing now.`
+        : `${who}'s turn. Press “Let them continue”, or tell ${who} to “check the hub”.`));
   }
 
   const scroll = h("div", { class: "scroll", id: "posts" }, body);
@@ -474,7 +556,13 @@ function renderComposer(thread) {
 
   // Live updates reuse this box; the posts on screen are then newer than `thread`, so send against what's shown.
   const shown = () => (state.current && state.current.id === thread.id ? state.current : thread);
-  const send = h("button", { class: "btn primary", onclick: (e) => busy(e.currentTarget, () => sendReply(shown(), draft, error)) }, "Send");
+  const cont = h("input", { type: "checkbox", checked: pref("continueAfterReply", false),
+    onchange: (e) => setPref("continueAfterReply", e.target.checked) });
+  const contLabel = h("label", { class: `continue ${state.agents.includes(draft.handTo) ? "" : "hidden"}`,
+    title: "Claude and GPT keep taking turns after your reply, until it's your turn again" }, cont, "Then let them continue");
+  seg.addEventListener("click", () => contLabel.classList.toggle("hidden", !state.agents.includes(draft.handTo)));
+  draft.continue = () => cont.checked && state.agents.includes(draft.handTo);
+  const send = h("button", { class: "btn primary", title: "Send (⌘ Enter)", onclick: (e) => busy(e.currentTarget, () => sendReply(shown(), draft, error)) }, "Send");
 
   return h("div", { class: "composer", "data-thread": thread.id, "data-status": thread.status },
     draft.re ? h("div", { class: "replying" }, `Replying to ${draft.re}`,
@@ -484,7 +572,7 @@ function renderComposer(thread) {
       h("span", { class: "muted small" }, "Who answers next?"), seg,
       h("button", { class: "btn ghost small", onclick: () => { draft.more = !draft.more; more.classList.toggle("hidden"); } }, "More options"),
       h("span", { class: "spacer" }),
-      h("span", { class: "hint" }, "⌘ Enter to send"),
+      contLabel,
       send),
     more);
 }
@@ -496,9 +584,14 @@ async function sendReply(thread, draft, error) {
       method: "POST",
       body: { body: draft.body, hand_to: draft.handTo, type: draft.type, re: draft.re, expected_revision: thread.revision },
     });
+    const keepGoing = draft.continue && draft.continue();
     delete state.drafts[thread.id];
     for (const note of result.notes || []) toast(note);
-    toast(draft.handTo === "none" ? "Posted" : `Posted. Tell ${nameOf(draft.handTo)} to “check the hub”.`);
+    if (keepGoing) {
+      await startRun(thread.id, pref("runLimit", 20));
+    } else {
+      toast(draft.handTo === "none" ? "Posted" : `Posted. Tell ${nameOf(draft.handTo)} to “check the hub”, or let them continue.`);
+    }
     await Promise.all([openThread(thread.id), loadThreads()]);
   } catch (err) {
     if (err.status === 409) {
@@ -537,6 +630,8 @@ function openNewThread() {
   let to = state.agents[0] || "claude";
   let type = "question";
   const error = h("div", { class: "error-text", role: "alert" });
+  let limit = pref("runLimit", 20);
+  const cont = h("input", { type: "checkbox", checked: pref("continueNewThread", true) });
   const who = h("div", { class: "segmented", role: "group", "aria-label": "Ask first" },
     state.agents.map((agent) => h("button", {
       type: "button", "aria-pressed": agent === to ? "true" : "false",
@@ -548,13 +643,15 @@ function openNewThread() {
       onclick: (e) => { type = value; kind.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", "false")); e.currentTarget.setAttribute("aria-pressed", "true"); },
     }, label)));
 
-  dialog("Start a thread", "Claude and GPT will see it the next time you ask them to “check the hub”.",
+  dialog("Start a thread", "Claude and GPT can take it from here on their own, or the next time you ask them to “check the hub”.",
     h("div", {},
       h("label", { class: "field" }, h("span", {}, "What should they discuss?"), title),
       h("label", { class: "field" }, h("span", {}, "Details"), body),
       h("div", { class: "field" }, h("span", { class: "small muted" }, "Ask first"), h("div", {}, who)),
       h("div", { class: "field" }, h("span", { class: "small muted" }, "This is"), h("div", {}, kind)),
       h("label", { class: "field" }, h("span", {}, "Tags (optional)"), tags),
+      h("div", { class: "field continue-row" }, h("label", { class: "continue" }, cont, "Let them continue on their own,"),
+        limitPicker(limit, (n) => { limit = n; })),
       error),
     (close) => [
       h("button", { class: "btn", onclick: close }, "Cancel"),
@@ -564,7 +661,13 @@ function openNewThread() {
         try {
           const result = await api("/api/threads", { method: "POST", body: { title: title.value, body: body.value, to, type, tags: tags.value } });
           close();
-          toast(`Thread started. Tell ${nameOf(to)} to “check the hub”.`);
+          setPref("continueNewThread", cont.checked);
+          if (cont.checked) {
+            setPref("runLimit", limit);
+            await startRun(result.id, limit);
+          } else {
+            toast(`Thread started. Tell ${nameOf(to)} to “check the hub”.`);
+          }
           await loadThreads();
           location.hash = `#/t/${result.id}`;
         } catch (err) { error.textContent = err.message; }
@@ -606,6 +709,8 @@ const CHECK_NAMES = {
   "MCP · Claude Code": "Claude Code",
   "MCP · Claude desktop": "Claude (Chat tab)",
   "MCP · ChatGPT/Codex": "ChatGPT and Codex",
+  "runner · Claude": "Claude, taking turns on its own",
+  "runner · GPT": "GPT, taking turns on its own",
 };
 const APP_CHECKS = ["MCP · Claude Code", "MCP · Claude desktop", "MCP · ChatGPT/Codex"];
 
@@ -741,8 +846,11 @@ function connectEvents() {
     await loadThreads();
     if (state.view === "thread" && state.current && (data.threads || []).includes(state.current.id)) {
       const before = state.current.posts.length;
+      const wasRunning = isRunning(state.current);
       try {
         state.current = await api(`/api/threads/${state.current.id}`);
+        const run = state.current.run;
+        if (wasRunning && run && run.status !== "running") toast(run.reason, run.status === "failed" ? "bad" : "");
         renderThread({ keepScroll: true, keepComposer: true });
         const item = state.threads.find((t) => t.id === state.current.id);
         if (item) { item.unread = 0; renderList(); }

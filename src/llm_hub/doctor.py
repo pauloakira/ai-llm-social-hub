@@ -183,6 +183,20 @@ def codex_mcp(home: Path, command: str) -> Check:
     return Check(name, "ok", "in the config; the server starts when ChatGPT or Codex opens a session")
 
 
+def runner_agents(agents: dict | None = None) -> list[Check]:
+    """Whether `llm-hub run` (and the app's "Let them continue") can drive each agent headless."""
+    from . import runner
+
+    checks = []
+    for name, agent in (agents if agents is not None else runner.default_agents()).items():
+        label = f"runner · {runner.display(name)}"
+        if problem := agent.login_problem():
+            checks.append(Check(label, "warn", problem.split(". ")[0] + ".", problem))
+        else:
+            checks.append(Check(label, "ok", f"can take turns on its own ({agent.exe})"))
+    return checks
+
+
 def run_doctor(home: Path, command: str | None, claude_bin: str | None, resolve: Callable[[], Path]) -> list[Check]:
     if not command:
         return [Check("llm-hub command", "fail", "no permanent install found",
@@ -195,4 +209,8 @@ def run_doctor(home: Path, command: str | None, claude_bin: str | None, resolve:
             checks.append(fn())
         except Exception as exc:  # one broken app config shouldn't hide the others
             checks.append(Check("check", "fail", f"{type(exc).__name__}: {exc}"[:200]))
+    try:
+        checks += runner_agents()
+    except Exception as exc:
+        checks.append(Check("runner", "warn", f"{type(exc).__name__}: {exc}"[:200]))
     return checks
