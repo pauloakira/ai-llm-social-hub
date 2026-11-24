@@ -1,4 +1,5 @@
 import json
+import os
 import plistlib
 import threading
 
@@ -203,3 +204,67 @@ def test_launcher_app_bundle(tmp_path):
     assert app_launcher(home, "/y/llm-hub", dry_run=False, uninstall=True).status == "removed"
     assert not app.exists()
     assert app_launcher(tmp_path / "linux-home", "/x", dry_run=False, uninstall=False).status == "skipped"
+
+
+# ---------- the runner ----------
+
+class SignedIn:
+    def __init__(self, ok=True):
+        self.ok = ok
+
+    def login_problem(self):
+        return None if self.ok else "Claude Code isn't signed in."
+
+
+def runner_client(hub, started, signed_in=True):
+    agents = lambda: {"claude": SignedIn(signed_in), "gpt": SignedIn()}  # noqa: E731
+    return make_client(AppConfig(resolve=lambda: hub.root, token=TOKEN, agents=agents,
+                                 start_run=lambda root, tid, n: started.append((root, tid, n))))
+
+
+def test_start_a_run(hub):
+    from llm_hub import runner
+
+    started = []
+    c = runner_client(hub, started)
+    tid = c.post("/api/threads", json={"title": "T", "body": "B", "to": "claude"}).json()["id"]
+    resp = c.post(f"/api/threads/{tid}/run", json={"max_turns": 12})
+    assert resp.status_code == 202 and started == [(hub.root, tid, 12)]
+    assert c.post(f"/api/threads/{tid}/run", json={"max_turns": 500}).status_code == 400
+
+    runner.save_state(hub.root, runner.RunState(thread=tid, pid=os.getpid(), agent="claude", max_turns=12))
+    run = c.get(f"/api/threads/{tid}").json()["run"]
+    assert run["status"] == "running" and run["agent"] == "claude"
+    assert c.get("/api/threads").json()["threads"][0]["run"]["status"] == "running"
+    resp = c.post(f"/api/threads/{tid}/run", json={})
+    assert resp.status_code == 400 and "already running" in resp.json()["error"]
+
+
+def test_run_refuses_with_a_reason(hub):
+    started = []
+    tid = hub.create_thread("human", "T", "B", "claude", "question").id
+    c = runner_client(hub, started, signed_in=False)
+    resp = c.post(f"/api/threads/{tid}/run", json={})
+    assert resp.status_code == 400 and "isn't signed in" in resp.json()["error"] and not started
+    hub.reply("human", tid, "Mine", "human", "note")
+    resp = runner_client(hub, started).post(f"/api/threads/{tid}/run", json={})
+    assert resp.status_code == 400 and "your turn" in resp.json()["error"]
+
+
+def test_stop_a_run(hub, client):
+    tid = hub.create_thread("human", "T", "B", "claude", "question").id
+    assert client.post(f"/api/threads/{tid}/run/stop").json() == {"stopping": False}
+    assert client.post(f"/api/threads/{tid}/run", json={}).status_code == 501
+
+
+def test_run_progress_is_a_live_update(hub):
+    from llm_hub import runner
+
+    tid = hub.create_thread("human", "T", "B", "claude", "question").id
+    client = make_client(AppConfig(resolve=lambda: hub.root, token=TOKEN, poll_interval=0.05, max_events=1))
+    progress = threading.Timer(0.3, lambda: runner.save_state(hub.root, runner.RunState(thread=tid, pid=1)))
+    progress.start()
+    text = client.get("/api/events").text
+    progress.join()
+    change = [line for line in text.splitlines() if line.startswith("data:")][-1]
+    assert json.loads(change[5:])["threads"] == [tid]

@@ -84,7 +84,7 @@ def serve(port: int, command: str | None, claude_bin: str | None, *, idle_timeou
     """Run the app server in this process (what the launcher starts in the background)."""
     import uvicorn
 
-    from .. import cli
+    from .. import cli, runner
     from .app import AppConfig, create_app, health_checks, pick_folder, quit_claude_desktop, reveal_claude_skill, setup_steps
 
     home = Path.home()
@@ -120,6 +120,8 @@ def serve(port: int, command: str | None, claude_bin: str | None, *, idle_timeou
         quit_claude=quit_claude_desktop,
         health=lambda: health_checks(home, command, claude_bin, cli.resolve_root),
         setup=run_setup,
+        agents=runner.default_agents,
+        start_run=(lambda root, tid, n: runner.start_detached(command, root, tid, n)) if command else None,
         idle_timeout=idle_timeout,
         on_idle=stop,
     )

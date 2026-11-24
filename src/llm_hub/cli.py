@@ -229,6 +229,35 @@ def cmd_app(args: argparse.Namespace) -> None:
     print(url if args.no_open else f"LLM Hub is open in your browser. If it didn't open, go to:\n{url}")
 
 
+def cmd_run(args: argparse.Namespace) -> None:
+    from . import runner
+
+    root = resolve_root(args.root)
+    if args.stop:
+        print(f"Stopping {args.thread}…" if runner.stop(root, args.thread) else f"{args.thread} isn't running.")
+        return
+    if args.status:
+        state = runner.load_state(root, args.thread)
+        if not state:
+            print(f"{args.thread} has never run.")
+        else:
+            now = f", {runner.display(state.agent)} is taking a turn" if state.agent else ""
+            print(f"{state.thread}: {state.status}{now} · {state.posts} of {state.max_turns} posts. {state.reason}".strip())
+            print(f"Log: {runner.log_path(root, args.thread)}")
+        return
+    command = _llm_hub_command()
+    if not command:
+        raise HubError("No permanent llm-hub install found. Install it first: "
+                       "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub")
+
+    def show(state: "runner.RunState") -> None:
+        if state.agent:
+            print(f"{time.strftime('%H:%M:%S')} {runner.display(state.agent)} is taking a turn…", flush=True)
+
+    state = runner.run(root, args.thread, args.max_turns, mcp_command=command, files=not args.no_files, on_change=show)
+    print(f"{state.status}: {state.reason} ({state.posts} agent posts)")
+
+
 def cmd_ls(args: argparse.Namespace) -> None:
     hub = Hub(resolve_root(args.root))
     threads = hub.threads(status=args.status, tag=args.tag)
@@ -347,6 +376,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--stay", action="store_true", help=argparse.SUPPRESS)  # with --serve: never stop when idle
     p.add_argument("--command", help=argparse.SUPPRESS)  # the llm-hub to run the server with (development)
     p.set_defaults(func=cmd_app)
+
+    p = sub.add_parser("run", help="let Claude and GPT take turns on a thread by themselves until it needs you")
+    p.add_argument("thread")
+    p.add_argument("--max-turns", type=int, default=20, help="most agent posts in this run (default: 20)")
+    p.add_argument("--no-files", action="store_true", help="don't let the agents read the project's files")
+    p.add_argument("--stop", action="store_true", help="stop a running run")
+    p.add_argument("--status", action="store_true", help="show the latest run and where its log is")
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("ls", help="list threads")
     p.add_argument("--status", default="open", choices=["open", "resolved", "all"])

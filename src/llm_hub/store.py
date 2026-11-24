@@ -452,6 +452,20 @@ class Hub:
             self._set_cursor(author, thread)
         return thread, post, notes
 
+    def allow_turns(self, thread_id: str, n: int) -> Thread:
+        """Let the agents post `n` more times before the turn comes back to the human (the runner's budget).
+        A human action: it sets the thread's max_turns to the agent posts so far plus `n`."""
+        if n < 1:
+            raise HubError("Allow at least one turn.")
+        with self._lock():
+            thread = self.get(thread_id)
+            if thread.meta["status"] != "open":
+                raise HubError(f"{thread.id} is {thread.meta['status']}.")
+            thread.meta["max_turns"] = int(thread.meta.get("turns", 0)) + n
+            self._bump(thread)
+            self._save(thread)
+        return thread
+
     def update_summary(
         self, author: str, thread_id: str, summary: str, *, expected_revision: int | None = None
     ) -> Thread:
