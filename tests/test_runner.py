@@ -199,3 +199,15 @@ def test_real_agent_commands_are_locked_down(tmp_path, monkeypatch):
     assert codex[codex.index("--sandbox") + 1] == "read-only" and "--ignore-user-config" in codex
     assert codex[codex.index("-C") + 1] == str(tmp_path)
     assert 'mcp_servers.llm-hub.command="/bin/llm-hub"' in codex and 'model="gpt-x"' in codex
+
+
+def test_agent_env_drops_a_host_claude_sessions_variables(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://host-app")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+    monkeypatch.setenv("HOME_KEEP", "1")
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    assert runner.agent_env()["ANTHROPIC_BASE_URL"] == "http://host-app"  # a user's own setting stays
+    monkeypatch.setenv("CLAUDECODE", "1")
+    env = runner.agent_env()
+    assert "ANTHROPIC_BASE_URL" not in env and "CLAUDE_CODE_SESSION_ID" not in env and "CLAUDECODE" not in env
+    assert env["HOME_KEEP"] == "1"

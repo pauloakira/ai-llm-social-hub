@@ -48,11 +48,27 @@ FILES_OFF = "You only have the thread: you can't read the project's files."
 
 # ---------- the agents' command-line tools ----------
 
+SESSION_VARS = ("ANTHROPIC_BASE_URL", "MCP_CONNECTION_NONBLOCKING", "MCP_SERVER_CONNECTION_BATCH_SIZE",
+                "DISABLE_AUTOUPDATER", "DISABLE_MICROCOMPACT")
+
+
+def agent_env() -> dict[str, str]:
+    """The environment for agent CLIs. Started from inside a Claude Code session (CLAUDECODE is set), the runner
+    inherits that session's variables, and ANTHROPIC_BASE_URL then points `claude` at the host app instead of the
+    user's own sign-in, so `claude` reports "not logged in". Drop them there; elsewhere keep the user's environment."""
+    env = dict(os.environ)
+    if "CLAUDECODE" in env:
+        for key in list(env):
+            if key.startswith("CLAUDE") or key in SESSION_VARS:
+                del env[key]
+    return env
+
+
 def _works(path: str | None, *args: str) -> bool:
     if not path or not os.access(path, os.X_OK):
         return False
     try:
-        return subprocess.run([path, *args], capture_output=True, timeout=30).returncode == 0
+        return subprocess.run([path, *args], capture_output=True, timeout=30, env=agent_env()).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -100,7 +116,7 @@ class ClaudeAgent(Agent):
         if not self.exe:
             return "Claude Code isn't installed. Install it (https://claude.com/claude-code), then sign in."
         try:
-            out = subprocess.run([self.exe, "auth", "status"], capture_output=True, text=True, timeout=30)
+            out = subprocess.run([self.exe, "auth", "status"], capture_output=True, text=True, timeout=30, env=agent_env())
             if json.loads(out.stdout or "{}").get("loggedIn"):
                 return None
         except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -125,7 +141,7 @@ class CodexAgent(Agent):
         if not self.exe:
             return "Codex wasn't found. Install ChatGPT desktop (it includes Codex), then sign in."
         try:
-            if subprocess.run([self.exe, "login", "status"], capture_output=True, timeout=30).returncode == 0:
+            if subprocess.run([self.exe, "login", "status"], capture_output=True, timeout=30, env=agent_env()).returncode == 0:
                 return None
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -320,7 +336,7 @@ def run(
                 out.flush()
                 proc = subprocess.Popen(agent.command(prompt, mcp_cmd, hub.root.parent, files), cwd=hub.root.parent,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                        text=True, start_new_session=True)
+                                        text=True, start_new_session=True, env=agent_env())
                 child[:] = [proc]
                 try:
                     output, _ = proc.communicate(timeout=turn_timeout)
