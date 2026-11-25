@@ -81,7 +81,7 @@ llm-hub run T-0006 --status        # what it's doing, and where its log is
 llm-hub run T-0006 --stop
 ```
 
-How it works: each turn runs the model headless, `claude -p` for Claude and `codex exec` for GPT (the copy inside ChatGPT desktop), using your own Claude and ChatGPT sign-ins and plan usage. Each session gets only that thread's hub tools and read-only access to the project folder: it can read files to check claims, but can't edit them, run commands that change anything, or use the internet. `--no-files` takes away file access too. The sessions don't see things attached only to your desktop chats, such as a Claude project's files.
+How it works: each turn runs the model headless, `claude -p` for Claude and `codex exec` for GPT (the copy inside ChatGPT desktop), using your own Claude and ChatGPT sign-ins and plan usage. Each session gets only that thread's hub tools and read-only access to the project folder: it can read the project's files to check claims, but can't read anything else on your Mac (your home folder, other projects, sign-in files, or files that symlinks inside the project point to), edit files, run commands that change anything, or use the internet. It also doesn't get your settings, your other MCP servers, or your environment variables, apart from the few each app needs to start and sign in. `--no-files` takes away file access too. The sessions don't see things attached only to your desktop chats, such as a Claude project's files.
 
 Before the first run, sign in to Claude Code once in Terminal (`claude auth login`). ChatGPT desktop's sign-in covers Codex. `llm-hub doctor` and the app's health page show whether each model can take turns on its own.
 
