@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -133,9 +134,45 @@ def test_preflight_checks_sign_in_before_changing_anything(hub):
 
 def test_only_one_run_per_thread(hub):
     tid = start_thread(hub)
-    runner.save_state(hub.root, RunState(thread=tid, pid=os.getpid()))
-    with pytest.raises(HubError, match="already running"):
-        run(hub, tid)
+    lock = runner.take_lock(hub.root, tid)
+    try:
+        # the lock alone decides, even before the first run has written its state
+        with pytest.raises(HubError, match="already running"):
+            run(hub, tid)
+        assert runner.take_lock(hub.root, tid) is None
+    finally:
+        os.close(lock)
+    assert runner.runner_pid(hub.root, tid) is None
+    state, _, _ = run(hub, tid, modes=("ping-pong", "ask-human"))
+    assert state.status == "done"
+
+
+def test_a_second_start_waits_for_the_first_to_hold_the_lock(hub, tmp_path):
+    """Two starts in a row (a double click): the first holds the lock before start_detached returns, so the second
+    one's checks see it running."""
+    tid = start_thread(hub)
+    script = slow_run_script(hub, tid, tmp_path)
+    command = tmp_path / "llm-hub"
+    command.write_text(f"#!/bin/sh\nexec {sys.executable} {script}\n")
+    command.chmod(0o755)
+    pid = runner.start_detached(str(command), hub.root, tid, 5)
+    try:
+        assert runner.runner_pid(hub.root, tid) == pid
+        with pytest.raises(HubError, match="already running"):
+            runner.preflight(hub.root, tid, {n: FakeAgent(n, hub.root) for n in ("claude", "gpt")})
+    finally:
+        wait_for(lambda: (s := runner.load_state(hub.root, tid)) and s.agent_pgid)
+        assert runner.stop(hub.root, tid)
+        wait_for(lambda: runner.runner_pid(hub.root, tid) is None)
+
+
+def test_start_detached_reports_why_a_run_didnt_start(hub, tmp_path):
+    tid = start_thread(hub)
+    command = tmp_path / "llm-hub"
+    command.write_text("#!/bin/sh\necho 'error: Codex isn'\\''t signed in.'; exit 1\n")
+    command.chmod(0o755)
+    with pytest.raises(HubError, match="Codex isn't signed in"):
+        runner.start_detached(str(command), hub.root, tid, 5)
 
 
 def test_a_run_whose_process_died_reads_as_stopped(hub):
@@ -147,8 +184,8 @@ def test_a_run_whose_process_died_reads_as_stopped(hub):
     assert state.status == "stopped" and state.agent is None
 
 
-def test_stop_ends_a_run_and_its_agent(hub, tmp_path):
-    tid = start_thread(hub)
+def slow_run_script(hub, tid, tmp_path):
+    """A script that runs the thread with agents that take 30 seconds a turn."""
     script = tmp_path / "run.py"
     script.write_text(textwrap.dedent(f"""
         import sys
@@ -159,17 +196,74 @@ def test_stop_ends_a_run_and_its_agent(hub, tmp_path):
         agents = {{n: FakeAgent(n, root, "slow") for n in ("claude", "gpt")}}
         runner.run(root, {tid!r}, 5, mcp_command="llm-hub", agents=agents, alert=lambda m: None)
     """))
-    proc = subprocess.Popen([sys.executable, str(script)])
-    deadline = time.time() + 20
+    return script
+
+
+def wait_for(condition, timeout=20):
+    deadline = time.time() + timeout
     while time.time() < deadline:
-        state = runner.load_state(hub.root, tid)
-        if state and state.agent == "gpt":
-            break
-        time.sleep(0.1)
+        if result := condition():
+            return result
+        time.sleep(0.05)
+    raise AssertionError("timed out")
+
+
+def agent_turn_started(hub, tid):
+    return wait_for(lambda: (s := runner.load_state(hub.root, tid)) and s.agent == "gpt" and s.agent_pgid and s)
+
+
+def test_stop_ends_a_run_and_its_agent(hub, tmp_path):
+    tid = start_thread(hub)
+    proc = subprocess.Popen([sys.executable, str(slow_run_script(hub, tid, tmp_path))])
+    agent_turn_started(hub, tid)
     assert runner.stop(hub.root, tid)
     proc.wait(timeout=20)
     state = runner.load_state(hub.root, tid)
     assert state.status == "stopped" and len(hub.get(tid).posts) == 1
+
+
+def test_a_stop_while_the_agent_is_starting_still_stops_it(hub, monkeypatch):
+    """SIGTERM between starting the agent and recording it used to be missed: the run then waited out the turn."""
+    tid = start_thread(hub)
+    real_popen = subprocess.Popen
+
+    def popen(args, *a, **kw):
+        proc = real_popen(args, *a, **kw)
+        if FAKE_TURN in args:
+            os.kill(os.getpid(), signal.SIGTERM)  # the handler runs here, before the run has recorded the agent
+        return proc
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    started = time.monotonic()
+    state, _, _ = run(hub, tid, modes=("slow", "slow"), turn_timeout=25)
+    assert time.monotonic() - started < 10
+    assert state.status == "stopped" and len(hub.get(tid).posts) == 1
+
+
+def test_an_agent_left_behind_by_a_killed_run_can_be_stopped(hub, tmp_path):
+    tid = start_thread(hub)
+    proc = subprocess.Popen([sys.executable, str(slow_run_script(hub, tid, tmp_path))])
+    pgid = agent_turn_started(hub, tid).agent_pgid
+    proc.kill()  # the run dies without a chance to clean up; its agent keeps going
+    proc.wait()
+    state = runner.load_state(hub.root, tid)
+    assert state.status == "running" and "still taking its turn" in state.reason
+    with pytest.raises(HubError, match="still taking its turn"):
+        run(hub, tid)
+    assert runner.stop(hub.root, tid)
+    wait_for(lambda: runner.agent_group(RunState(thread=tid, agent_pgid=pgid)) is None)
+    state = runner.load_state(hub.root, tid)
+    assert state.status == "stopped" and len(hub.get(tid).posts) == 1
+
+
+def test_a_reused_process_group_is_never_taken_for_the_agent(hub):
+    tid = start_thread(hub)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        assert runner.agent_group(RunState(thread=tid, agent_pgid=other.pid)) is None
+    finally:
+        other.kill()
+        other.wait()
 
 
 def test_allow_turns_sets_the_budget_from_the_posts_so_far(hub):
@@ -186,9 +280,12 @@ def test_real_agent_commands_are_locked_down(tmp_path, monkeypatch):
     mcp = ["/bin/llm-hub", "--root", "/r/llm-hub", "serve", "--agent", "claude", "--thread", "T-0001"]
     claude = ClaudeAgent("claude", "/bin/claude").command("PROMPT", mcp, tmp_path, files=True)
     assert "--strict-mcp-config" in claude and claude[claude.index("--tools") + 1] == "Read,Grep,Glob"
+    # Read/Grep/Glob must not be pre-approved: approved, they'd read the whole disk instead of the project
     allowed = claude[claude.index("--allowedTools") + 1].split(",")
     assert set(allowed) == {"mcp__llm-hub__read_thread", "mcp__llm-hub__reply", "mcp__llm-hub__update_summary",
-                            "mcp__llm-hub__resolve", "Read", "Grep", "Glob"}
+                            "mcp__llm-hub__resolve"}
+    assert claude[claude.index("--permission-mode") + 1] == "dontAsk"
+    assert claude[claude.index("--setting-sources") + 1] == ""
     config = json.loads(claude[claude.index("--mcp-config") + 1])
     assert config["mcpServers"]["llm-hub"]["args"][-2:] == ["--thread", "T-0001"]
     no_files = ClaudeAgent("claude", "/bin/claude").command("PROMPT", mcp, tmp_path, files=False)
@@ -196,18 +293,47 @@ def test_real_agent_commands_are_locked_down(tmp_path, monkeypatch):
 
     codex = CodexAgent("gpt", "/bin/codex").command("PROMPT", mcp, tmp_path, files=True)
     assert codex[:2] == ["/bin/codex", "exec"] and codex[-1] == "PROMPT"
-    assert codex[codex.index("--sandbox") + 1] == "read-only" and "--ignore-user-config" in codex
+    assert "--sandbox" not in codex and "--ignore-user-config" in codex
+    assert 'default_permissions="llm_hub"' in codex and 'shell_environment_policy.inherit="core"' in codex
+    assert f'permissions.llm_hub.filesystem={{":minimal"="read", {json.dumps(str(tmp_path))}="read"}}' in codex
     assert codex[codex.index("-C") + 1] == str(tmp_path)
     assert 'mcp_servers.llm-hub.command="/bin/llm-hub"' in codex and 'model="gpt-x"' in codex
+
+
+def test_codex_without_files_reads_only_an_empty_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_HUB_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(runner, "codex_model_settings", lambda: {})
+    codex = CodexAgent("gpt", "/bin/codex").command("PROMPT", ["/bin/llm-hub"], tmp_path / "repo", files=False)
+    empty = tmp_path / "state" / "no-files"
+    assert codex[codex.index("-C") + 1] == str(empty) and empty.is_dir() and not any(empty.iterdir())
+    assert str(tmp_path / "repo") not in " ".join(codex)
+
+
+def test_agents_get_a_minimal_environment(monkeypatch):
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+    claude, codex = ClaudeAgent("claude", None).env(), CodexAgent("gpt", None).env()
+    assert "GITHUB_TOKEN" not in claude and "GITHUB_TOKEN" not in codex  # the user's other secrets stay out
+    assert claude["ANTHROPIC_API_KEY"] == "sk-ant" and "OPENAI_API_KEY" not in claude  # each gets only its own
+    assert codex["OPENAI_API_KEY"] == "sk-openai" and "ANTHROPIC_API_KEY" not in codex
+    assert "AWS_SECRET_ACCESS_KEY" not in codex
+    for env in (claude, codex):
+        assert env["HOME"] == os.environ["HOME"] and env["PATH"] == os.environ["PATH"] and env["LC_ALL"]
 
 
 def test_agent_env_drops_a_host_claude_sessions_variables(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://host-app")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
-    monkeypatch.setenv("HOME_KEEP", "1")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom")
     monkeypatch.delenv("CLAUDECODE", raising=False)
-    assert runner.agent_env()["ANTHROPIC_BASE_URL"] == "http://host-app"  # a user's own setting stays
+    env = ClaudeAgent("claude", None).env()
+    assert env["ANTHROPIC_BASE_URL"] == "http://host-app" and env["CLAUDE_CONFIG_DIR"] == "/custom"  # the user's own
+    assert "CLAUDE_CODE_SESSION_ID" not in env
     monkeypatch.setenv("CLAUDECODE", "1")
-    env = runner.agent_env()
-    assert "ANTHROPIC_BASE_URL" not in env and "CLAUDE_CODE_SESSION_ID" not in env and "CLAUDECODE" not in env
-    assert env["HOME_KEEP"] == "1"
+    env = ClaudeAgent("claude", None).env()
+    assert "ANTHROPIC_BASE_URL" not in env and "CLAUDE_CONFIG_DIR" not in env and "CLAUDECODE" not in env
+    assert env["HOME"] == os.environ["HOME"]

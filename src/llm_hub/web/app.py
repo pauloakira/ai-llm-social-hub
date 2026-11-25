@@ -16,6 +16,7 @@ import hmac
 import json
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -133,6 +134,7 @@ def _error(message: str, status: int = 400, **extra) -> JSONResponse:
 def create_app(config: AppConfig) -> Starlette:
     last_activity = [time.monotonic()]
     open_pages = [0]
+    start_lock = threading.Lock()
     health_cache: dict = {}
 
     def hub() -> Hub:
@@ -311,8 +313,12 @@ def create_app(config: AppConfig) -> Starlette:
             raise HubError("max_turns must be a number.")
         if not 1 <= max_turns <= 100:
             raise HubError("Choose between 1 and 100 turns.")
-        await run_in_threadpool(runner.preflight, current.root, tid, config.agents())
-        await run_in_threadpool(config.start_run, current.root, tid, max_turns)
+        def start() -> None:
+            with start_lock:  # one start at a time; the run's own lock refuses a second run on the thread
+                runner.preflight(current.root, tid, config.agents())
+                config.start_run(current.root, tid, max_turns)
+
+        await run_in_threadpool(start)
         return JSONResponse({"started": tid, "max_turns": max_turns}, status_code=202)
 
     async def stop_run(request: Request) -> Response:

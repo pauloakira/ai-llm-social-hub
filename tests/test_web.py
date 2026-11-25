@@ -232,12 +232,16 @@ def test_start_a_run(hub):
     assert resp.status_code == 202 and started == [(hub.root, tid, 12)]
     assert c.post(f"/api/threads/{tid}/run", json={"max_turns": 500}).status_code == 400
 
-    runner.save_state(hub.root, runner.RunState(thread=tid, pid=os.getpid(), agent="claude", max_turns=12))
-    run = c.get(f"/api/threads/{tid}").json()["run"]
-    assert run["status"] == "running" and run["agent"] == "claude"
-    assert c.get("/api/threads").json()["threads"][0]["run"]["status"] == "running"
-    resp = c.post(f"/api/threads/{tid}/run", json={})
-    assert resp.status_code == 400 and "already running" in resp.json()["error"]
+    lock = runner.take_lock(hub.root, tid)  # what a live run holds
+    try:
+        runner.save_state(hub.root, runner.RunState(thread=tid, pid=os.getpid(), agent="claude", max_turns=12))
+        run = c.get(f"/api/threads/{tid}").json()["run"]
+        assert run["status"] == "running" and run["agent"] == "claude"
+        assert c.get("/api/threads").json()["threads"][0]["run"]["status"] == "running"
+        resp = c.post(f"/api/threads/{tid}/run", json={})
+        assert resp.status_code == 400 and "already running" in resp.json()["error"]
+    finally:
+        os.close(lock)
 
 
 def test_run_refuses_with_a_reason(hub):
