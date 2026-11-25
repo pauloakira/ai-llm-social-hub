@@ -250,9 +250,12 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise HubError("No permanent llm-hub install found. Install it first: "
                        "uv tool install git+https://github.com/pauloakira/ai-llm-social-hub")
 
+    shown = [None]
+
     def show(state: "runner.RunState") -> None:
-        if state.agent:
+        if state.agent and state.agent != shown[0]:
             print(f"{time.strftime('%H:%M:%S')} {runner.display(state.agent)} is taking a turn…", flush=True)
+        shown[0] = state.agent
 
     state = runner.run(root, args.thread, args.max_turns, mcp_command=command, files=not args.no_files, on_change=show)
     print(f"{state.status}: {state.reason} ({state.posts} agent posts)")

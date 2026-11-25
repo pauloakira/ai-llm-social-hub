@@ -2,14 +2,22 @@
 
 The desktop apps can't be scripted, so each turn runs the agent headless: `claude -p` for claude, `codex exec` for gpt.
 Each session gets only the thread-scoped hub server (`serve --thread`: read_thread, reply, update_summary, resolve)
-and, optionally, read-only access to the hub's project folder. It runs until an agent hands the turn to the human or
-closes the thread, the turn budget runs out, an agent fails to post twice in a row, or someone stops the run.
+and, optionally, read-only access to the hub's project folder and nothing else on disk: Claude's Read/Grep/Glob are
+left to its default rule (the working directory only; anything else is denied unattended), and Codex runs under a
+permissions profile that can read only the project and system files. Neither gets the user's settings, other MCP
+servers, or environment variables beyond what it needs to start and sign in. It runs until an agent hands the turn
+to the human or closes the thread, the turn budget runs out, an agent fails to post twice in a row, or someone stops
+the run.
 
 Progress is kept in <hub>/.state/runs/<thread>.json (and .log) so the app and `llm-hub run --status` can show it.
+A run holds an exclusive lock on <thread>.lock for its whole life, so two runs can't start on one thread and a run
+that died reads as stopped. The agent taking a turn is recorded too, so if the run itself is killed, its agent can
+still be found and stopped.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -48,27 +56,39 @@ FILES_OFF = "You only have the thread: you can't read the project's files."
 
 # ---------- the agents' command-line tools ----------
 
-SESSION_VARS = ("ANTHROPIC_BASE_URL", "MCP_CONNECTION_NONBLOCKING", "MCP_SERVER_CONNECTION_BATCH_SIZE",
-                "DISABLE_AUTOUPDATER", "DISABLE_MICROCOMPACT")
+# What every agent CLI needs to start, find its sign-in and reach the internet (proxies, company certificates).
+BASE_VARS = ("HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "TERM", "__CF_USER_TEXT_ENCODING",
+             "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+             "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE")
+BASE_PREFIXES = ("LC_", "LLM_HUB_")
+# Each agent's own settings (a user may sign in with an API key or a cloud provider).
+CLAUDE_PREFIXES = ("ANTHROPIC_", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_", "AWS_", "CLOUD_ML_REGION", "VERTEX_REGION_",
+                   "GOOGLE_APPLICATION_CREDENTIALS")
+CODEX_PREFIXES = ("OPENAI_", "CODEX_")
+# A host Claude Code session's variables, which must not leak into the agents (see agent_env).
+SESSION_VARS = ("ANTHROPIC_BASE_URL",)
 
 
-def agent_env() -> dict[str, str]:
-    """The environment for agent CLIs. Started from inside a Claude Code session (CLAUDECODE is set), the runner
-    inherits that session's variables, and ANTHROPIC_BASE_URL then points `claude` at the host app instead of the
-    user's own sign-in, so `claude` reports "not logged in". Drop them there; elsewhere keep the user's environment."""
-    env = dict(os.environ)
-    if "CLAUDECODE" in env:
-        for key in list(env):
-            if key.startswith("CLAUDE") or key in SESSION_VARS:
-                del env[key]
+def agent_env(prefixes: tuple[str, ...] = ()) -> dict[str, str]:
+    """A minimal environment for an agent CLI: the basics plus the agent's own settings, never the user's other
+    variables (which may hold secrets). Started from inside a Claude Code session (CLAUDECODE is set), the runner
+    also inherits that session's variables, and ANTHROPIC_BASE_URL then points `claude` at the host app instead of
+    the user's own sign-in, so those are dropped too."""
+    hosted = "CLAUDECODE" in os.environ
+    env = {}
+    for key, value in os.environ.items():
+        if hosted and (key.startswith("CLAUDE") or key in SESSION_VARS):
+            continue
+        if key in BASE_VARS or key.startswith(BASE_PREFIXES + prefixes):
+            env[key] = value
     return env
 
 
-def _works(path: str | None, *args: str) -> bool:
+def _works(path: str | None, prefixes: tuple[str, ...], *args: str) -> bool:
     if not path or not os.access(path, os.X_OK):
         return False
     try:
-        return subprocess.run([path, *args], capture_output=True, timeout=30, env=agent_env()).returncode == 0
+        return subprocess.run([path, *args], capture_output=True, timeout=30, env=agent_env(prefixes)).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -78,7 +98,7 @@ def find_claude() -> str | None:
     home = Path.home()
     candidates = [os.environ.get("LLM_HUB_CLAUDE"), shutil.which("claude"), str(home / ".local/bin/claude"),
                   str(home / ".claude/local/claude"), "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-    return next((c for c in candidates if _works(c, "--version")), None)
+    return next((c for c in candidates if _works(c, CLAUDE_PREFIXES, "--version")), None)
 
 
 def find_codex() -> str | None:
@@ -86,7 +106,7 @@ def find_codex() -> str | None:
     home = Path.home()
     candidates = [os.environ.get("LLM_HUB_CODEX"), "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
                   str(home / ".codex/plugins/.plugin-appserver/codex-cli/bin/codex"), shutil.which("codex")]
-    return next((c for c in candidates if _works(c, "--version")), None)
+    return next((c for c in candidates if _works(c, CODEX_PREFIXES, "--version")), None)
 
 
 @dataclass
@@ -95,9 +115,13 @@ class Agent:
 
     name: str
     exe: str | None
+    env_prefixes = ()
 
     def command(self, prompt: str, mcp_cmd: list[str], repo: Path, files: bool) -> list[str]:
         raise NotImplementedError
+
+    def env(self) -> dict[str, str]:
+        return agent_env(self.env_prefixes)
 
     def login_problem(self) -> str | None:
         """A sentence telling the human how to fix sign-in, or None when signed in."""
@@ -105,18 +129,24 @@ class Agent:
 
 
 class ClaudeAgent(Agent):
+    env_prefixes = CLAUDE_PREFIXES
+
     def command(self, prompt: str, mcp_cmd: list[str], repo: Path, files: bool) -> list[str]:
         mcp = {"mcpServers": {"llm-hub": {"command": mcp_cmd[0], "args": mcp_cmd[1:]}}}
-        allowed = [f"mcp__llm-hub__{t}" for t in HUB_TOOLS] + (list(READ_TOOLS) if files else [])
+        # Only the hub tools are pre-approved. Read/Grep/Glob are offered but not approved, so Claude's default rule
+        # applies: reading inside the working directory (the project) is allowed, and reading anywhere else would
+        # need a prompt, which dontAsk turns into a refusal. Pre-approving them would allow reading the whole disk.
+        # No setting sources: the user's or project's allow rules, extra directories and hooks can't widen that.
         return [self.exe, "-p", prompt, "--mcp-config", json.dumps(mcp), "--strict-mcp-config",
-                "--tools", ",".join(READ_TOOLS) if files else "", "--allowedTools", ",".join(allowed),
-                "--permission-mode", "dontAsk", "--no-session-persistence"]
+                "--tools", ",".join(READ_TOOLS) if files else "",
+                "--allowedTools", ",".join(f"mcp__llm-hub__{t}" for t in HUB_TOOLS),
+                "--permission-mode", "dontAsk", "--setting-sources", "", "--no-session-persistence"]
 
     def login_problem(self) -> str | None:
         if not self.exe:
             return "Claude Code isn't installed. Install it (https://claude.com/claude-code), then sign in."
         try:
-            out = subprocess.run([self.exe, "auth", "status"], capture_output=True, text=True, timeout=30, env=agent_env())
+            out = subprocess.run([self.exe, "auth", "status"], capture_output=True, text=True, timeout=30, env=self.env())
             if json.loads(out.stdout or "{}").get("loggedIn"):
                 return None
         except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -124,11 +154,30 @@ class ClaudeAgent(Agent):
         return "Claude Code isn't signed in. Open Terminal, run `claude auth login` once, then start again."
 
 
+CODEX_PROFILE = "llm_hub"
+
+
+def no_files_dir() -> Path:
+    """An empty folder for agents that may not read the project."""
+    path = Path(os.environ.get("LLM_HUB_HOME", "~/.llm-hub")).expanduser() / "no-files"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class CodexAgent(Agent):
+    env_prefixes = CODEX_PREFIXES
+
     def command(self, prompt: str, mcp_cmd: list[str], repo: Path, files: bool) -> list[str]:
-        cmd = [self.exe, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
-               # read-only also means no network for shell commands; without files, a scratch folder as workdir
-               "--sandbox", "read-only", "-C", str(repo if files else Path.home() / ".llm-hub"),
+        workdir = Path(repo) if files else no_files_dir()
+        # The built-in read-only sandbox can still read the whole disk. This profile lets the shell read only the
+        # system files a command needs (":minimal") and the working folder, and write nothing; with no network
+        # section it has no network either. The hub server runs outside it, so posting still works.
+        readable = {":minimal": "read", str(workdir): "read"}
+        table = "{" + ", ".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in readable.items()) + "}"
+        cmd = [self.exe, "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "-C", str(workdir),
+               "-c", f"permissions.{CODEX_PROFILE}.filesystem={table}",
+               "-c", f'default_permissions="{CODEX_PROFILE}"',
+               "-c", 'shell_environment_policy.inherit="core"',  # shell commands see only HOME, PATH and the like
                "-c", f"mcp_servers.llm-hub.command={json.dumps(mcp_cmd[0])}",
                "-c", f"mcp_servers.llm-hub.args={json.dumps(mcp_cmd[1:])}",
                "-c", 'approval_policy="never"']
@@ -141,7 +190,7 @@ class CodexAgent(Agent):
         if not self.exe:
             return "Codex wasn't found. Install ChatGPT desktop (it includes Codex), then sign in."
         try:
-            if subprocess.run([self.exe, "login", "status"], capture_output=True, timeout=30, env=agent_env()).returncode == 0:
+            if subprocess.run([self.exe, "login", "status"], capture_output=True, timeout=30, env=self.env()).returncode == 0:
                 return None
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -170,6 +219,7 @@ class RunState:
     max_turns: int = DEFAULT_TURNS
     posts: int = 0
     agent: str | None = None  # who is taking a turn right now
+    agent_pgid: int = 0  # the process group of that agent's session
     reason: str = ""
     started: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)
@@ -187,6 +237,45 @@ def log_path(hub_root: Path, thread: str) -> Path:
     return runs_dir(hub_root) / f"{normalize_thread_id(thread)}.log"
 
 
+def lock_path(hub_root: Path, thread: str) -> Path:
+    return runs_dir(hub_root) / f"{normalize_thread_id(thread)}.lock"
+
+
+def take_lock(hub_root: Path, thread: str) -> int | None:
+    """Take the thread's run lock and record our PID in it. Returns the open lock (keep it for the run's life;
+    the OS releases it when the process ends, however it ends), or None when another run holds it."""
+    path = lock_path(hub_root, thread)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    return fd
+
+
+def runner_pid(hub_root: Path, thread: str) -> int | None:
+    """The PID of the run holding the thread's lock (0 if it can't be read), or None when no run is alive."""
+    path = lock_path(hub_root, thread)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:  # held: a run is alive
+            text = os.read(fd, 32).decode(errors="replace").strip()
+            return int(text) if text.isdigit() else 0
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return None
+    finally:
+        os.close(fd)
+
+
 def save_state(hub_root: Path, state: RunState) -> None:
     state.updated = time.time()
     path = state_path(hub_root, state.thread)
@@ -196,34 +285,93 @@ def save_state(hub_root: Path, state: RunState) -> None:
     os.replace(tmp, path)
 
 
-def _alive(pid: int) -> bool:
+def agent_group(state: RunState) -> int | None:
+    """The recorded agent's process group, if it's still running. A group is only taken to be the agent's when one
+    of its processes names the thread (every agent session's command line does), so a reused ID is never touched."""
+    pgid = state.agent_pgid
+    if pgid <= 0:
+        return None
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return pid > 0
+        os.killpg(pgid, 0)
+    except OSError:
+        return None
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pgid=,command="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        group, _, command = line.strip().partition(" ")
+        if group == str(pgid) and state.thread in command:
+            return pgid
+    return None
+
+
+def kill_group(pgid: int, grace: float = 3.0) -> None:
+    """SIGTERM a process group, then SIGKILL whatever is left after `grace` seconds."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def read_state(hub_root: Path, thread: str) -> RunState | None:
+    """The thread's run file as written."""
+    try:
+        data = json.loads(state_path(hub_root, thread).read_text())
+        return RunState(**{k: v for k, v in data.items() if k in RunState.__dataclass_fields__})
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+ORPHAN = "The run ended unexpectedly, but {agent} is still taking its turn. Stop it, or wait for it to finish."
 
 
 def load_state(hub_root: Path, thread: str) -> RunState | None:
-    """The thread's latest run; a 'running' one whose process is gone reads as stopped."""
-    try:
-        data = json.loads(state_path(hub_root, thread).read_text())
-        state = RunState(**{k: v for k, v in data.items() if k in RunState.__dataclass_fields__})
-    except (OSError, ValueError, TypeError):
-        return None
-    if state.status == "running" and not _alive(state.pid):
-        state.status, state.agent, state.reason = "stopped", None, "The run ended unexpectedly. See its log."
+    """The thread's latest run, as it is now. A 'running' run whose process is gone reads as stopped, unless its
+    agent is still taking a turn: then it still reads as running (so it can be stopped) and says what happened."""
+    state = read_state(hub_root, thread)
+    if not state or state.status != "running":
+        return state
+    if (pid := runner_pid(hub_root, thread)) is not None:
+        state.pid = pid
+    elif agent_group(state):
+        state.pid, state.reason = 0, ORPHAN.format(agent=display(state.agent or "an agent"))
+    else:
+        state.status, state.agent, state.agent_pgid = "stopped", None, 0
+        state.reason = "The run ended unexpectedly. See its log."
     return state
 
 
 def stop(hub_root: Path, thread: str) -> bool:
-    """Ask a running run to stop (it finishes cleanly and records why). Returns whether one was running."""
+    """Stop a running run. A live run is asked to stop (it ends its agent's turn and records why); an agent left
+    behind by a run that died is stopped directly. Returns whether anything was running."""
     state = load_state(hub_root, thread)
     if not state or state.status != "running":
         return False
-    os.kill(state.pid, signal.SIGTERM)
+    if state.pid > 0:
+        os.kill(state.pid, signal.SIGTERM)
+        return True
+    if pgid := agent_group(state):
+        kill_group(pgid)
+    if lock := take_lock(hub_root, thread):  # record it, unless a new run started meanwhile
+        try:
+            if (current := read_state(hub_root, thread)) and current.status == "running":
+                current.status, current.agent, current.agent_pgid = "stopped", None, 0
+                current.reason = "Stopped. The thread is as the agents left it."
+                save_state(hub_root, current)
+        finally:
+            os.close(lock)
     return True
 
 
@@ -239,13 +387,17 @@ def display(agent: str) -> str:
     return {"claude": "Claude", "gpt": "GPT", HUMAN: "You"}.get(agent, agent)
 
 
-def preflight(hub_root: Path, thread_id: str, agents: dict[str, Agent]) -> tuple[Hub, str]:
-    """Everything that would stop a run from starting, as a HubError with a sentence for the human."""
+def preflight(hub_root: Path, thread_id: str, agents: dict[str, Agent], *, locked: bool = False) -> tuple[Hub, str]:
+    """Everything that would stop a run from starting, as a HubError with a sentence for the human. `locked` means
+    the caller holds the thread's run lock (so no other run is alive; only a left-behind agent can still be)."""
     hub = Hub(hub_root)
     thread = hub.get(thread_id)
     tid = thread.id
-    previous = load_state(hub.root, tid)
-    if previous and previous.status == "running":
+    if locked:
+        previous = read_state(hub.root, tid)
+        if previous and previous.status == "running" and agent_group(previous):
+            raise HubError(ORPHAN.format(agent=display(previous.agent or "an agent")))
+    elif (previous := load_state(hub.root, tid)) and previous.status == "running":
         raise HubError(f"{tid} is already running. Stop it first.")
     if thread.meta["status"] != "open":
         raise HubError(f"{tid} is closed. Reply to reopen it first.")
@@ -273,7 +425,17 @@ def run(
 ) -> RunState:
     """Run agents on the thread until it needs the human. `mcp_command` is the llm-hub that serves each session."""
     agents = default_agents() if agents is None else agents
-    hub, tid = preflight(hub_root, thread_id, agents)
+    lock = take_lock(Hub(hub_root).root, thread_id)
+    if lock is None:
+        raise HubError(f"{normalize_thread_id(thread_id)} is already running. Stop it first.")
+    try:
+        return _run(hub_root, thread_id, max_turns, mcp_command, agents, files, turn_timeout, on_change, alert)
+    finally:
+        os.close(lock)
+
+
+def _run(hub_root, thread_id, max_turns, mcp_command, agents, files, turn_timeout, on_change, alert) -> RunState:
+    hub, tid = preflight(hub_root, thread_id, agents, locked=True)
     hub.allow_turns(tid, max_turns)
     state = RunState(thread=tid, pid=os.getpid(), max_turns=max_turns)
     child: list[subprocess.Popen] = []
@@ -336,8 +498,11 @@ def run(
                 out.flush()
                 proc = subprocess.Popen(agent.command(prompt, mcp_cmd, hub.root.parent, files), cwd=hub.root.parent,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                        text=True, start_new_session=True, env=agent_env())
+                                        text=True, start_new_session=True, env=agent.env())
                 child[:] = [proc]
+                update(agent_pgid=proc.pid)  # so the agent can still be found if this run dies
+                if stopping[0]:  # a stop that arrived while the agent was starting didn't see it yet
+                    os.killpg(proc.pid, signal.SIGTERM)
                 try:
                     output, _ = proc.communicate(timeout=turn_timeout)
                 except subprocess.TimeoutExpired:
@@ -345,6 +510,7 @@ def run(
                     output, _ = proc.communicate()
                     output += f"\n[llm-hub] {awaiting} took longer than {turn_timeout:.0f}s and was stopped.\n"
                 child.clear()
+                update(agent_pgid=0)
                 out.write(output or "")
                 out.flush()
 
@@ -368,16 +534,32 @@ def run(
         raise
     finally:
         signal.signal(signal.SIGTERM, old_handler)
+        if child:  # never leave an agent running behind a run that ended (a crash, Ctrl-C)
+            kill_group(child[0].pid, grace=1.0)
+            state.agent_pgid = 0
 
 
-def start_detached(command: str, hub_root: Path, thread: str, max_turns: int, files: bool = True) -> int:
-    """Start `llm-hub run` in the background (used by the app). Returns its PID."""
+def start_detached(command: str, hub_root: Path, thread: str, max_turns: int, files: bool = True,
+                   wait: float = 15.0) -> int:
+    """Start `llm-hub run` in the background (used by the app) and wait until it holds the thread's run lock, so a
+    second start right after this one is refused. Returns its PID; raises HubError if it ended without starting."""
     args = [command, "--root", str(hub_root), "run", normalize_thread_id(thread), "--max-turns", str(max_turns)]
     if not files:
         args.append("--no-files")
     log = log_path(hub_root, thread)
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a") as fh:
+    with log.open("ab") as fh:
+        offset = fh.tell()
         proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
                                 start_new_session=True, close_fds=True)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if runner_pid(hub_root, thread) == proc.pid:
+            break
+        if proc.poll() is not None:
+            with log.open("rb") as fh:
+                fh.seek(offset)
+                lines = [line.strip() for line in fh.read().decode(errors="replace").splitlines() if line.strip()]
+            raise HubError(lines[-1].removeprefix("error: ") if lines else "The run didn't start. See its log.")
+        time.sleep(0.05)
     return proc.pid
